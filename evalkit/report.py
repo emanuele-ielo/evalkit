@@ -362,10 +362,11 @@ def format_report(report: CampaignReport, *, compact: bool = False) -> str:
             f"judge: {report.judge.model} x{report.judge.votes} votes, rubric {report.judge.rubric_version}, "
             f"required: {', '.join(report.judge.required_criteria)}"
         )
-        lines.append(
-            f"pass bridge: every turn mean >= {report.judge.pass_threshold:g}/5, "
-            f"required criterion >= {report.judge.min_criterion_score}/5, mechanical blockers clear"
-        )
+        if report.attempts_judged:
+            lines.append(
+                f"pass bridge: every turn mean >= {report.judge.pass_threshold:g}/5, "
+                f"required criterion >= {report.judge.min_criterion_score}/5, mechanical blockers clear"
+            )
     lines.append(
         f"attempts: {report.attempts_judged} judged / {report.attempts_collected} collected / "
         f"{report.attempts_total} planned · scenarios: {report.scenarios_total}"
