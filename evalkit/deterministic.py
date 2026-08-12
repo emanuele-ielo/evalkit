@@ -337,7 +337,11 @@ def check_turn(turn: TurnView, *, require_tool_call: bool | None = None) -> list
     ]
     if declared:
         declared_counts = Counter(declared)
-        called_counts = Counter(call.name for call in turn.tool_calls if call.declared_mock)
+        called_counts = Counter(
+            call.name
+            for call in turn.tool_calls
+            if call.declared_mock_index is not None
+        )
         uncalled = [
             f"{name} x{expected - called_counts[name]}"
             for name, expected in sorted(declared_counts.items())

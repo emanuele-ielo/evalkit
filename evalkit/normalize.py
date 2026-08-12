@@ -150,9 +150,9 @@ def _mark_mocks(tool_calls: list[ToolCallView], mocks: list[dict[str, Any]]) -> 
     """Match calls to individual mock declarations, including repeated tools.
 
     The old name->payload map silently collapsed two mocks for the same tool.
-    Here every declaration is consumable once.  Exact expected-input matches
-    win; when none matches we still associate the first declaration so the
-    deterministic layer can report the input mismatch explicitly.
+    Here every declaration is consumable once. Exact expected-input matches
+    win. A same-name call with the wrong input is marked as a mismatch but does
+    not consume a declaration that a later, correct call may satisfy.
     """
     indexed = [
         (index, mock, str(mock.get("tool_name") or mock.get("name") or ""))
@@ -170,13 +170,17 @@ def _mark_mocks(tool_calls: list[ToolCallView], mocks: list[dict[str, Any]]) -> 
                 for entry in candidates
                 if _expected_input_matches(entry[1].get("expected_input"), call.args)
             ),
-            candidates[0],
+            None,
         )
+        if chosen is None:
+            call.declared_mock = True
+            call.matches_mock_input = False
+            continue
         index, mock, _ = chosen
         consumed.add(index)
         call.declared_mock = True
         call.declared_mock_index = index
-        call.matches_mock_input = _expected_input_matches(mock.get("expected_input"), call.args)
+        call.matches_mock_input = True
         expected_output = mock.get("mock_output")
         if expected_output is not None:
             call.matches_mock = canonical(expected_output) == canonical(call.output)

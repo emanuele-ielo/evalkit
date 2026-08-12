@@ -115,6 +115,28 @@ class ToolContractsTest(unittest.TestCase):
         self.assertFalse(checks["mock_expected_input"].passed)
         self.assertTrue(checks["mock_expected_input"].blocking)
         self.assertEqual(checks["mock_expected_input"].hits, ["get_line_usage"])
+        self.assertFalse(checks["declared_mocks_called"].passed)
+
+    def test_wrong_repeated_input_does_not_consume_a_later_exact_mock(self) -> None:
+        calls = [
+            call("lookup", args={"kind": "wrong"}, output={"error": "MOCK_INPUT_MISMATCH"}),
+            call("lookup", args={"kind": "first"}, output={"value": 1}),
+            call("lookup", args={"kind": "second"}, output={"value": 2}),
+        ]
+        mocks = [
+            {"tool_name": "lookup", "expected_input": {"kind": "first"}, "mock_output": {"value": 1}},
+            {"tool_name": "lookup", "expected_input": {"kind": "second"}, "mock_output": {"value": 2}},
+        ]
+
+        _mark_mocks(calls, mocks)
+
+        self.assertEqual([item.declared_mock_index for item in calls], [None, 0, 1])
+        self.assertEqual([item.matches_mock_input for item in calls], [False, True, True])
+        target = turn(calls, {"required_tools": ["lookup"]})
+        target.expected.declared_mocks = mocks
+        checks = by_name(check_turn(target))
+        self.assertTrue(checks["declared_mocks_called"].passed)
+        self.assertFalse(checks["mock_expected_input"].passed)
 
     def test_missing_duplicate_mock_is_counted_not_collapsed_by_name(self) -> None:
         calls = [call("lookup", args={"n": 1}, output={"n": 1})]
@@ -134,4 +156,3 @@ class ToolContractsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
