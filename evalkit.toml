@@ -12,8 +12,9 @@ model = "claude-sonnet-5"
 # OpenAI reasoning models only.
 reasoning_effort = "medium"
 votes = 3
-# Concurrent judge LLM calls across the whole process.
-concurrency = 6
+# Concurrent judge LLM calls across the whole process. The RPS limiter below
+# remains the authoritative provider-pressure ceiling.
+concurrency = 64
 max_retries = 3
 # Requests per second ceiling for judge calls (0 disables the limiter).
 requests_per_second = 3.0
@@ -47,6 +48,6 @@ wful_profile = "tim-enterprise-sandbox"
 workspace = "2b85609f-8bf7-5a1b-9c67-e7907f0cb180"
 repo = "~/GIT/wonderful/Vera/agent-vera"
 # Default scenario set: the batch file listing the slugs to run.
-batch = "v2_answerable"
-concurrency = 4
+batch = "customer_care_full_v1_115"
+concurrency = 24
 rounds = 3

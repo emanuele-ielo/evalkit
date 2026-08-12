@@ -26,6 +26,7 @@ rubric v4: neither creates a deterministic requirement here.
 from __future__ import annotations
 
 import re
+from collections import Counter
 
 from .schemas import DeterministicCheck, TurnView
 
@@ -231,7 +232,7 @@ def check_turn(turn: TurnView, *, require_tool_call: bool | None = None) -> list
     # -- tool discipline -----------------------------------------------------
     called = [call.name for call in turn.tool_calls]
     allowed = set(turn.expected.tools_allowed)
-    contract = turn.expected.metadata.get("evalkit_v4")
+    contract = turn.expected.metadata.get("evalkit_v5") or turn.expected.metadata.get("evalkit_v4")
     if isinstance(contract, dict) and contract.get("response_mode") == "clarify":
         checks.append(
             DeterministicCheck(
@@ -260,9 +261,88 @@ def check_turn(turn: TurnView, *, require_tool_call: bool | None = None) -> list
             )
         )
 
-    declared = sorted({str(m.get("tool_name") or m.get("name")) for m in turn.expected.declared_mocks if m.get("tool_name") or m.get("name")})
+    # EvalKit v5 makes trajectory requirements explicit instead of deriving
+    # them from mocks or a non-empty allowlist.
+    if isinstance(contract, dict):
+        required_tools = [str(name) for name in contract.get("required_tools") or []]
+        missing_tools = [name for name in required_tools if name not in called]
+        if required_tools:
+            checks.append(
+                DeterministicCheck(
+                    name="required_tools",
+                    passed=not missing_tools,
+                    detail="all required tools were called" if not missing_tools else "required tool(s) missing",
+                    hits=missing_tools,
+                )
+            )
+
+        forbidden_tools = {str(name) for name in contract.get("forbidden_tools") or []}
+        forbidden_calls = sorted({name for name in called if name in forbidden_tools})
+        if forbidden_tools:
+            checks.append(
+                DeterministicCheck(
+                    name="forbidden_tools",
+                    passed=not forbidden_calls,
+                    detail="no forbidden tool was called" if not forbidden_calls else "forbidden tool(s) called",
+                    hits=forbidden_calls,
+                )
+            )
+
+        expected_sequence = [str(name) for name in contract.get("tool_sequence") or []]
+        if expected_sequence:
+            position = 0
+            for name in called:
+                if position < len(expected_sequence) and name == expected_sequence[position]:
+                    position += 1
+            sequence_ok = position == len(expected_sequence)
+            checks.append(
+                DeterministicCheck(
+                    name="tool_sequence",
+                    passed=sequence_ok,
+                    detail=(
+                        "required tool sequence observed"
+                        if sequence_ok
+                        else f"required ordered subsequence not observed: {' -> '.join(expected_sequence)}"
+                    ),
+                    hits=[] if sequence_ok else expected_sequence,
+                )
+            )
+
+        cardinality = contract.get("tool_cardinality")
+        if isinstance(cardinality, dict):
+            counts = Counter(called)
+            violations: list[str] = []
+            for name, raw_bounds in cardinality.items():
+                bounds = raw_bounds if isinstance(raw_bounds, dict) else {}
+                minimum = int(bounds.get("min", 0))
+                maximum_raw = bounds.get("max")
+                maximum = int(maximum_raw) if maximum_raw is not None else None
+                actual = counts[str(name)]
+                if actual < minimum or (maximum is not None and actual > maximum):
+                    upper = "∞" if maximum is None else str(maximum)
+                    violations.append(f"{name}: {actual} call(s), expected {minimum}..{upper}")
+            checks.append(
+                DeterministicCheck(
+                    name="tool_cardinality",
+                    passed=not violations,
+                    detail="tool call cardinality satisfied" if not violations else "tool call cardinality violated",
+                    hits=violations,
+                )
+            )
+
+    declared = [
+        str(m.get("tool_name") or m.get("name"))
+        for m in turn.expected.declared_mocks
+        if m.get("tool_name") or m.get("name")
+    ]
     if declared:
-        uncalled = [name for name in declared if name not in called]
+        declared_counts = Counter(declared)
+        called_counts = Counter(call.name for call in turn.tool_calls if call.declared_mock)
+        uncalled = [
+            f"{name} x{expected - called_counts[name]}"
+            for name, expected in sorted(declared_counts.items())
+            if called_counts[name] < expected
+        ]
         checks.append(
             DeterministicCheck(
                 name="declared_mocks_called",
@@ -273,6 +353,19 @@ def check_turn(turn: TurnView, *, require_tool_call: bool | None = None) -> list
                     else "declared mock(s) never called — the platform runner fails these too"
                 ),
                 hits=uncalled,
+            )
+        )
+        input_mismatches = [call.name for call in turn.tool_calls if call.declared_mock and call.matches_mock_input is False]
+        checks.append(
+            DeterministicCheck(
+                name="mock_expected_input",
+                passed=not input_mismatches,
+                detail=(
+                    "tool inputs match their declared mocks"
+                    if not input_mismatches
+                    else "tool input differs from the declared expected_input"
+                ),
+                hits=input_mismatches,
             )
         )
         mismatched = [call.name for call in turn.tool_calls if call.declared_mock and call.matches_mock is False]
@@ -295,7 +388,8 @@ def check_turn(turn: TurnView, *, require_tool_call: bool | None = None) -> list
         if isinstance(contract, dict) and contract.get("response_mode") == "clarify":
             needs_tool = False
         else:
-            needs_tool = bool(allowed or declared)
+            required = contract.get("required_tools") if isinstance(contract, dict) else None
+            needs_tool = bool(required or allowed or declared)
     if needs_tool:
         checks.append(
             DeterministicCheck(
@@ -356,9 +450,15 @@ def taxonomy_from_checks(checks: list[DeterministicCheck]) -> list[str]:
             tags.append("no_tool_call")
         elif check.name == "clarification_no_tool":
             tags.append("premature_tool_call")
-        elif check.name == "declared_mocks_called":
+        elif check.name in {"declared_mocks_called", "required_tools"}:
             tags.append("no_tool_call")
-        elif check.name == "tools_allowed":
+        elif check.name in {
+            "tools_allowed",
+            "forbidden_tools",
+            "tool_sequence",
+            "tool_cardinality",
+            "mock_expected_input",
+        }:
             tags.append("wrong_channel_or_procedure")
         elif check.name == "pcv_no_contact":
             tags.append("wrong_channel_or_procedure")
