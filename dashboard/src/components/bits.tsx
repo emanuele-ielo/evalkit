@@ -1,18 +1,39 @@
 import type { ReactNode } from 'react'
 import type { TokenUsage } from '../types'
 
-export function Chip({
+export type Tone = 'default' | 'good' | 'warn' | 'bad' | 'info' | 'accent' | 'solid'
+
+/** The one place the 1–5 scale turns into a colour. */
+export function scoreTone(value: number | null | undefined): 'good' | 'warn' | 'bad' | 'none' {
+  if (value === null || value === undefined) return 'none'
+  if (value >= 4) return 'good'
+  if (value >= 3) return 'warn'
+  return 'bad'
+}
+
+/**
+ * Does this campaign actually carry 1–5 scores?
+ *
+ * A mean on the 1–5 scale can never legitimately be 0, so a zero mean means the
+ * campaign was judged with the old pass/fail rubric and the score fields are
+ * just unset defaults. Showing "0.00 / 5" for those would invent a number.
+ */
+export function hasScores(report: { mean_score: number; attempts_judged: number } | null | undefined): boolean {
+  return Boolean(report && report.attempts_judged > 0 && report.mean_score > 0)
+}
+
+export function Pill({
   children,
   tone = 'default',
   mono = false,
   title,
 }: {
   children: ReactNode
-  tone?: 'default' | 'pass' | 'fail' | 'warn' | 'accent'
+  tone?: Tone
   mono?: boolean
   title?: string
 }) {
-  const classes = ['chip']
+  const classes = ['pill']
   if (tone !== 'default') classes.push(tone)
   if (mono) classes.push('mono')
   return (
@@ -22,68 +43,94 @@ export function Chip({
   )
 }
 
-export function Verdict({ passed, label }: { passed: boolean | null | undefined; label?: string }) {
-  if (passed === null || passed === undefined) return <Chip>{label ? `${label} —` : '—'}</Chip>
+export function Tag({ children, title }: { children: ReactNode; title?: string }) {
   return (
-    <Chip tone={passed ? 'pass' : 'fail'}>
-      {label ? `${label} ` : ''}
-      {passed ? 'pass' : 'fail'}
-    </Chip>
+    <span className="tag" title={title}>
+      {children}
+    </span>
   )
 }
 
-export function Score({ value, size = 'md' }: { value: number | null | undefined; size?: 'md' | 'lg' }) {
-  if (value === null || value === undefined) return <Chip>—</Chip>
-  const tone = value >= 4 ? 'pass' : value >= 3 ? 'warn' : 'fail'
+export function Eyebrow({ children }: { children: ReactNode }) {
+  return <span className="eyebrow">{children}</span>
+}
+
+export function Verdict({ passed, label }: { passed: boolean | null | undefined; label?: string }) {
+  if (passed === null || passed === undefined) return <Pill>{label ? `${label} —` : '—'}</Pill>
   return (
-    <span className={`score ${tone} ${size}`}>
-      {value.toFixed(2)}
+    <Pill tone={passed ? 'good' : 'bad'}>
+      {label ? `${label} ` : ''}
+      {passed ? 'pass' : 'fail'}
+    </Pill>
+  )
+}
+
+export function Score({ value, digits = 2 }: { value: number | null | undefined; digits?: number }) {
+  if (value === null || value === undefined) return <span className="score none">—</span>
+  return (
+    <span className={`score ${scoreTone(value)}`}>
+      {value.toFixed(digits)}
       <small>/5</small>
+    </span>
+  )
+}
+
+/** The big number in a hero stat card. */
+export function HeroNum({ value, of }: { value: ReactNode; of?: ReactNode }) {
+  return (
+    <span className="hero-num">
+      {value}
+      {of !== undefined && <small> / {of}</small>}
     </span>
   )
 }
 
 export function Stat({
   k,
-  v,
+  value,
   of,
-  delta,
+  foot,
+  tone,
   hint,
 }: {
   k: string
-  v: ReactNode
+  value: ReactNode
   of?: ReactNode
-  delta?: { value: number; suffix?: string } | null
+  foot?: ReactNode
+  tone?: 'up' | 'down'
   hint?: string
 }) {
   return (
     <div className="stat" title={hint}>
-      <div className="k">{k}</div>
-      <div className="v">
-        {v}
-        {of !== undefined && <small> / {of}</small>}
-      </div>
-      {delta ? (
-        <div className={`d ${delta.value > 0 ? 'up' : delta.value < 0 ? 'down' : ''}`}>
-          {delta.value > 0 ? '+' : ''}
-          {delta.value} {delta.suffix ?? 'vs official'}
-        </div>
-      ) : null}
+      <span className="k">{k}</span>
+      <HeroNum value={value} of={of} />
+      {foot !== undefined && <span className={`foot${tone ? ` ${tone}` : ''}`}>{foot}</span>}
     </div>
   )
 }
 
-export function Bar({ name, value, total, tone }: { name: string; value: number; total: number; tone?: 'pass' }) {
-  const pct = total > 0 ? Math.round((100 * value) / total) : 0
+/** A criterion or ratio bar. `max` defaults to the 1–5 scale. */
+export function Bar({
+  name,
+  value,
+  max = 5,
+  label,
+  tone,
+}: {
+  name: string
+  value: number
+  max?: number
+  label?: string
+  tone?: 'good' | 'warn' | 'bad' | 'info'
+}) {
+  const pct = max > 0 ? Math.max(0, Math.min(100, (value / max) * 100)) : 0
   return (
     <div className="bar-row">
-      <div className="name">{name}</div>
-      <div className="bar-track">
-        <div className={`bar-fill${tone ? ` ${tone}` : ''}`} style={{ width: `${pct}%` }} />
-      </div>
-      <div className="val">
-        {value}/{total} · {pct}%
-      </div>
+      <span className="name">{name}</span>
+      <span className="bar-track">
+        <span className={`bar-fill${tone ? ` ${tone}` : ''}`} style={{ width: `${pct}%` }} />
+      </span>
+      <span className="val">{label ?? value.toFixed(2)}</span>
     </div>
   )
 }
@@ -107,6 +154,12 @@ export function ms(value: number | null | undefined): string {
   return `${(value / 1000).toFixed(1)} s`
 }
 
+export function kb(bytes: number | null | undefined): string {
+  if (!bytes) return '—'
+  if (bytes < 1024) return `${bytes} B`
+  return `${(bytes / 1024).toFixed(1)} KB`
+}
+
 export function ago(iso: string | null | undefined): string {
   if (!iso) return '—'
   const then = new Date(iso).getTime()
@@ -128,19 +181,20 @@ export function tokenLine(usage: TokenUsage | null | undefined): string {
 }
 
 /** Highlight every occurrence of `needle` inside `text`. */
-export function highlight(text: string, needle: string | null): ReactNode {
+export function highlight(text: string, needle: string | null | undefined): ReactNode {
   if (!needle || needle.length < 4) return text
-  const index = text.toLowerCase().indexOf(needle.toLowerCase())
-  if (index === -1) return text
+  const haystack = text.toLowerCase()
+  const target = needle.toLowerCase()
+  let position = haystack.indexOf(target)
+  if (position === -1) return text
   const out: ReactNode[] = []
   let cursor = 0
-  let position = index
   let key = 0
   while (position !== -1) {
     out.push(text.slice(cursor, position))
     out.push(<mark key={key++}>{text.slice(position, position + needle.length)}</mark>)
     cursor = position + needle.length
-    position = text.toLowerCase().indexOf(needle.toLowerCase(), cursor)
+    position = haystack.indexOf(target, cursor)
     if (key > 40) break
   }
   out.push(text.slice(cursor))

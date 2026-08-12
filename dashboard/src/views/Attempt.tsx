@@ -1,6 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import type { ReactNode } from 'react'
 import { api, useAsync } from '../api'
-import { Chip, Empty, ErrorBox, Score, Verdict, diffLines, highlight, ms, num, tokenLine } from '../components/bits'
+import { Empty, ErrorBox, Pill, Score, Tag, Verdict, diffLines, highlight, kb, ms, num, scoreTone, tokenLine } from '../components/bits'
+import { JsonValue, countRows } from '../components/json'
+import { Markdown } from '../components/md'
+import { deriveLede, worstTurn } from '../lib/lede'
 import type { AttemptDetail, ClaimCheck, Sibling, ToolCallView, TurnView } from '../types'
 
 type Tab = 'verdict' | 'prompt' | 'llm' | 'raw'
@@ -11,131 +15,162 @@ interface Focus {
   locator: string
 }
 
-function ToolCard({
-  call,
-  focus,
-  open,
-  onToggle,
+function Collapsible({
+  title,
+  hint,
+  children,
+  tone,
 }: {
-  call: ToolCallView
-  focus: Focus | null
-  open: boolean
-  onToggle: () => void
+  title: string
+  hint?: string
+  children: ReactNode
+  tone?: 'accent' | 'bad'
 }) {
-  const payload = useMemo(() => {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="tool" style={tone === 'accent' ? { borderLeft: '2px solid var(--lavender)' } : undefined}>
+      <div className="tool-head" onClick={() => setOpen((value) => !value)}>
+        <span style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--fg-2)' }}>{title}</span>
+        {hint && (
+          <span className="kind" style={{ textWrap: 'pretty' }}>
+            {hint}
+          </span>
+        )}
+        <span className="spacer" />
+        <span className="m">{open ? '−' : '+'}</span>
+      </div>
+      {open && <div className="tool-body">{children}</div>}
+    </div>
+  )
+}
+
+function ToolCard({ call, focus }: { call: ToolCallView; focus: Focus | null }) {
+  const [raw, setRaw] = useState(false)
+  const [open, setOpen] = useState(true)
+
+  const rawText = useMemo(() => {
     try {
-      return JSON.stringify(call.output ?? call.output_raw, null, 1)
+      return JSON.stringify({ arguments: call.args, result: call.output ?? call.output_raw }, null, 2)
     } catch {
       return call.output_raw
     }
   }, [call])
 
-  const quoteHere = focus && payload.toLowerCase().includes(focus.quote.toLowerCase()) ? focus.quote : null
+  const lit = Boolean(focus && call.output_raw.toLowerCase().includes(focus.quote.toLowerCase()))
+  const rows = countRows(call.output)
+  const structured = call.output !== null && call.output !== undefined
 
   return (
-    <details className={`tool${quoteHere ? ' highlight' : ''}`} open={open}>
-      <summary
-        onClick={(event) => {
-          event.preventDefault()
-          onToggle()
-        }}
-      >
+    <div className={`tool${lit ? ' lit' : ''}${open ? ' open' : ''}`}>
+      <div className="tool-head" onClick={() => setOpen((value) => !value)}>
+        <span className="sq" />
         <span className="tname">{call.name}</span>
-        <span className="args-preview">{JSON.stringify(call.args ?? {})}</span>
+        <span className="kind">tool call</span>
+        <span className="peek">{JSON.stringify(call.args ?? {}).slice(0, 160)}</span>
         {call.declared_mock && (
-          <Chip tone={call.matches_mock === false ? 'warn' : 'accent'}>
+          <Pill tone={call.matches_mock === false ? 'warn' : 'accent'}>
             {call.matches_mock === false ? 'mock drift' : 'mocked'}
-          </Chip>
+          </Pill>
         )}
-        <Chip>{(call.output_bytes / 1024).toFixed(1)} KB</Chip>
-        {call.duration_ms !== null && <Chip>{ms(call.duration_ms)}</Chip>}
-      </summary>
-      <div className="tool-body">
-        <div>
-          <h4>arguments</h4>
-          <pre className="payload">{JSON.stringify(call.args ?? {}, null, 1)}</pre>
-        </div>
-        <div>
-          <h4>
-            payload returned to the model
-            {call.truncated && <span className="faint"> · truncated by the platform</span>}
-          </h4>
-          <pre className="payload">{highlight(payload, quoteHere)}</pre>
-        </div>
+        <span className="m">
+          {[rows !== null ? `${rows} rows` : null, kb(call.output_bytes), call.duration_ms ? ms(call.duration_ms) : null]
+            .filter(Boolean)
+            .join(' · ')}
+        </span>
+        <button
+          className="ghost"
+          onClick={(event) => {
+            event.stopPropagation()
+            setRaw((value) => !value)
+            setOpen(true)
+          }}
+        >
+          {raw ? 'pretty' : '{ } raw'}
+        </button>
       </div>
-    </details>
+
+      {open && !raw && (
+        <div className="tool-body">
+          <section>
+            <span className="eyebrow">Arguments</span>
+            <JsonValue value={call.args} focus={focus?.quote} />
+          </section>
+          <section>
+            <span className="eyebrow">
+              Payload returned to the model
+              {call.truncated && <span className="faint"> · capped by the platform at 16 KB</span>}
+            </span>
+            {structured ? (
+              <JsonValue value={call.output} focus={focus?.quote} />
+            ) : (
+              <pre className="raw">{highlight(call.output_raw, focus?.quote)}</pre>
+            )}
+            {call.output_parse_error && <span className="faint" style={{ fontSize: 11 }}>{call.output_parse_error}</span>}
+          </section>
+        </div>
+      )}
+
+      {open && raw && <pre className="raw">{highlight(rawText, focus?.quote)}</pre>}
+    </div>
   )
 }
 
 function Conversation({
   turns,
   focus,
-  openTools,
-  toggleTool,
+  scores,
 }: {
   turns: TurnView[]
   focus: Focus | null
-  openTools: Set<string>
-  toggleTool: (key: string) => void
+  scores: Map<number, number>
 }) {
   return (
     <div className="convo">
       {turns.map((turn) => (
-        <section key={turn.index}>
+        <section className="turn" key={turn.index}>
           <div className="turn-head">
-            <Chip mono>turn {turn.index + 1}</Chip>
-            {turn.passed !== null && <Verdict passed={turn.passed} label="official" />}
-            <span className="line" />
+            <span className="eyebrow">Turn {turn.index + 1}</span>
+            {turn.passed !== null && <Verdict passed={turn.passed} label="platform" />}
+            <span className="rule" />
           </div>
 
           {turn.user_message && (
             <div className="msg">
-              <div className="who">user</div>
-              <div className="bubble user">{turn.user_message}</div>
+              <span className="who">User</span>
+              <div className="bubble user">{highlight(turn.user_message, focus?.quote)}</div>
             </div>
           )}
 
-          {turn.messages
-            .filter((message) => message.role === 'tool')
-            .map((message) => {
-              const call = turn.tool_calls[message.tool_index ?? -1]
-              if (!call) return null
-              const key = `${turn.index}:${call.index}`
-              return (
-                <ToolCard
-                  key={key}
-                  call={call}
-                  focus={focus}
-                  open={openTools.has(key) || Boolean(focus && call.output_raw.toLowerCase().includes(focus.quote.toLowerCase()))}
-                  onToggle={() => toggleTool(key)}
-                />
-              )
-            })}
+          {turn.tool_calls.map((call) => (
+            <ToolCard key={call.index} call={call} focus={focus} />
+          ))}
 
           <div className="msg">
-            <div className="who">agent</div>
-            <div className={`bubble agent${turn.passed === false ? ' failed' : ''}`}>
-              {turn.agent_text || <span className="faint">(no user-facing answer)</span>}
+            <span className="who">Agent</span>
+            <div className={`bubble agent${ringFor(scores.get(turn.index), turn.passed)}`}>
+              {turn.agent_text ? (
+                <Markdown text={turn.agent_text} focus={focus?.quote} />
+              ) : (
+                <span className="faint">(no user-facing answer)</span>
+              )}
             </div>
           </div>
 
           {turn.expected.expected_output && (
-            <div className="callout accent">
-              <strong>reference facts the answer owed</strong>
-              <div style={{ marginTop: 6, whiteSpace: 'pre-wrap' }}>{turn.expected.expected_output}</div>
-            </div>
+            <Collapsible title="Reference facts the answer owed" hint="what the judge checked against" tone="accent">
+              <Markdown text={turn.expected.expected_output} focus={focus?.quote} />
+            </Collapsible>
           )}
+
           {turn.expected.reference_response && (
-            <details className="callout">
-              <summary style={{ cursor: 'pointer' }}>
-                <strong>reference answer</strong> <span className="faint">(one good answer, not the only one)</span>
-              </summary>
-              <div style={{ marginTop: 6, whiteSpace: 'pre-wrap' }}>{turn.expected.reference_response}</div>
-            </details>
+            <Collapsible title="Reference answer" hint="one good answer, not the only one">
+              <Markdown text={turn.expected.reference_response} />
+            </Collapsible>
           )}
+
           {turn.failure_reason && (
-            <div className="callout fail">
-              <strong>platform judge</strong>
+            <div className="callout bad">
+              <strong>Platform judge</strong>
               <div style={{ marginTop: 4 }}>{turn.failure_reason}</div>
             </div>
           )}
@@ -145,208 +180,298 @@ function Conversation({
   )
 }
 
-function Claim({ claim, onFocus }: { claim: ClaimCheck; onFocus: (focus: Focus) => void }) {
+/**
+ * The ring around an answer marks it as the thing that lost points. Our own score
+ * decides that when we have one; the platform's verdict is the fallback for
+ * attempts we have not judged.
+ */
+function ringFor(score: number | undefined, officialPassed: boolean | null): string {
+  if (score !== undefined) {
+    if (score < 3) return ' flag-bad'
+    if (score < 4) return ' flag-warn'
+    return ''
+  }
+  return officialPassed === false ? ' flag-bad' : ''
+}
+
+const CLAIM_TONE: Record<string, 'good' | 'warn' | 'bad'> = {
+  SUPPORTED: 'good',
+  FULL: 'good',
+  PRESENT: 'good',
+  PARTIAL: 'warn',
+  UNSUPPORTED: 'bad',
+  CONTRADICTED: 'bad',
+  MISS: 'bad',
+  ABSENT: 'bad',
+}
+
+function Claim({
+  status,
+  text,
+  quote,
+  locator,
+  note,
+  focus,
+  onFocus,
+}: {
+  status: string
+  text: string
+  quote?: string
+  locator?: string
+  note?: string
+  focus: Focus | null
+  onFocus?: (focus: Focus) => void
+}) {
+  const clickable = Boolean(quote && onFocus)
+  const lit = Boolean(quote && focus && focus.quote === quote)
   return (
     <div
-      className="claim"
-      onClick={() => claim.evidence_quote && onFocus({ quote: claim.evidence_quote, locator: claim.evidence_locator })}
-      title={claim.evidence_quote ? 'click to highlight the evidence in the payload' : undefined}
+      className={`claim${clickable ? ' clickable' : ''}${lit ? ' lit' : ''}`}
+      onClick={() => quote && onFocus?.({ quote, locator: locator ?? '' })}
+      title={clickable ? 'highlight this evidence in the payload on the left' : undefined}
     >
-      <div className="top">
-        <span className={`status ${claim.status}`}>{claim.status}</span>
-      </div>
-      <div className="text">{claim.claim}</div>
-      {claim.evidence_quote ? (
+      <span className={`status ${CLAIM_TONE[status] ?? 'warn'}`}>{status}</span>
+      <span className="text">{text}</span>
+      {quote ? (
         <>
-          <div className="ev">“{claim.evidence_quote}”</div>
-          <div className="loc">{claim.evidence_locator}</div>
+          <span className="ev">“{quote}”</span>
+          {locator && <span className="loc">{locator}</span>}
         </>
       ) : (
-        claim.note && <div className="ev faint">{claim.note}</div>
+        note && <span className="ev faint">{note}</span>
       )}
+      {clickable && !lit && <span className="hint">click to locate in the payload</span>}
     </div>
   )
 }
 
-function VerdictPanel({ detail, onFocus }: { detail: AttemptDetail; onFocus: (focus: Focus) => void }) {
+function VerdictPanel({ detail, focus, onFocus }: { detail: AttemptDetail; focus: Focus | null; onFocus: (focus: Focus) => void }) {
   const [voteIndex, setVoteIndex] = useState<number | 'aggregate'>('aggregate')
   const verdict = detail.verdict
+
   if (!verdict) {
     const legacy = detail.legacy_verdict
     return (
       <div className="inspector">
         {legacy ? (
           <div className="callout warn">
-            <strong>judged with rubric {legacy.rubric_version} (pass/fail)</strong>
-            <div style={{ marginTop: 6 }}>
-              <Verdict passed={legacy.passed} /> <span className="faint">by {legacy.judge_model}</span>
+            <strong>judged with rubric {legacy.rubric_version} — pass/fail, not 1–5</strong>
+            <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
+              <Verdict passed={legacy.passed} />
+              <span className="faint">by {legacy.judge_model}</span>
             </div>
-            <div style={{ marginTop: 6 }}>{legacy.explanation}</div>
-            <div style={{ marginTop: 8 }} className="faint">
-              The 1–5 scale cannot be derived from a pass/fail verdict — re-judge this campaign to score it:
+            <div style={{ marginTop: 8 }}>{legacy.explanation}</div>
+            <div style={{ marginTop: 10 }} className="faint">
+              A pass/fail cannot be turned into a score without inventing one. Re-judge the campaign to put it on the
+              1–5 scale:
               <br />
-              <code className="mono">evalkit judge {detail.campaign.id} --force</code>
+              <code className="cmd">evalkit judge {detail.campaign.id} --force</code>
             </div>
           </div>
         ) : (
           <Empty>
-            not judged yet — run
+            not judged yet
             <br />
-            <code className="mono">evalkit judge {detail.campaign.id}</code>
+            <code className="cmd">evalkit judge {detail.campaign.id}</code>
           </Empty>
         )}
       </div>
     )
   }
-  const turn = verdict.turns[0]
+
+  const lede = deriveLede(verdict)
+  const turn = worstTurn(verdict)
   const vote = voteIndex === 'aggregate' ? null : turn?.votes.find((item) => item.index === voteIndex)?.verdict ?? null
+  const official = detail.view.turns[0]?.official
 
   return (
     <div className="inspector">
-      <div className="verdict-head">
-        <Score value={verdict.score} size="lg" />
-        {verdict.coverage && <Chip tone={verdict.coverage === 'FULL' ? 'pass' : verdict.coverage === 'MISS' ? 'fail' : 'warn'}>{verdict.coverage}</Chip>}
-        <Verdict passed={verdict.passed} label="threshold" />
+      <div className={`lede-card ${lede.tone}`}>
+        <span className="kicker">
+          <span className="dot" />
+          {lede.kicker}
+        </span>
+        <span className="headline">{lede.headline}</span>
+        {verdict.explanation && <span className="body">{verdict.explanation}</span>}
+        {verdict.taxonomy.length > 0 && (
+          <div className="dist" style={{ marginTop: 2 }}>
+            {verdict.taxonomy.map((tag) => (
+              <Tag key={tag}>{tag}</Tag>
+            ))}
+          </div>
+        )}
       </div>
+
+      <div className="verdict-top">
+        <span className="big-num">
+          {verdict.score.toFixed(2)}
+          <small> / 5</small>
+        </span>
+        {verdict.coverage && (
+          <Pill tone={verdict.coverage === 'FULL' ? 'good' : verdict.coverage === 'MISS' ? 'bad' : 'warn'}>
+            {verdict.coverage}
+          </Pill>
+        )}
+        <Pill tone={verdict.passed ? 'good' : 'bad'}>threshold {verdict.passed ? 'pass' : 'fail'}</Pill>
+      </div>
+
       {turn?.score_capped_by && (
-        <div className="callout warn" style={{ fontSize: 12 }}>
-          score capped at {2} by a mechanical failure: <span className="mono">{turn.score_capped_by}</span>
+        <div className="notice bad">
+          <span className="dot" />
+          score capped at 2.00 by a mechanical failure: <span className="mono">{turn.score_capped_by}</span>
         </div>
       )}
 
-      <p className="subtle" style={{ fontSize: 12.5 }}>{verdict.explanation}</p>
-
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
-        {verdict.taxonomy.map((tag) => (
-          <Chip key={tag} mono tone="warn">{tag}</Chip>
-        ))}
-      </div>
-
-      <h3>criteria — median of the votes</h3>
-      <table className="plain">
-        <thead>
-          <tr>
-            <th>criterion</th>
-            <th className="num">votes</th>
-            <th className="num">median</th>
-          </tr>
-        </thead>
-        <tbody>
-          {turn?.criteria.map((criterion) => (
-            <tr key={criterion.name}>
-              <td>
+      {verdict.turns.map((each) => (
+        <div className="group" key={each.turn_index}>
+          <h3>
+            Criteria — median of {each.votes.length} vote{each.votes.length === 1 ? '' : 's'}
+            {verdict.turns.length > 1 && ` · turn ${each.turn_index + 1}`}
+          </h3>
+          {each.criteria.map((criterion) => (
+            <div className="crit-row" key={criterion.name}>
+              <span className="cname">
                 {criterion.name}
                 {!criterion.required && <span className="faint"> (advisory)</span>}
-              </td>
-              <td className="num faint">{criterion.scores.join(' · ') || '—'}</td>
-              <td className="num" style={{ width: 68 }}>
-                <Score value={criterion.score} />
-              </td>
-            </tr>
+              </span>
+              <span className="votes">{criterion.scores.join(' · ') || '—'}</span>
+              <Score value={criterion.score} />
+            </div>
           ))}
-        </tbody>
-      </table>
+        </div>
+      ))}
 
-      <h3 style={{ marginTop: 16 }}>deterministic checks</h3>
-      <table className="plain">
-        <tbody>
-          {turn?.deterministic.map((check) => (
-            <tr key={check.name}>
-              <td className="mono" style={{ fontSize: 11.5 }}>{check.name}</td>
-              <td>{check.hits.length > 0 ? <span className="faint">{check.hits.join(', ')}</span> : <span className="faint">{check.detail}</span>}</td>
-              <td style={{ width: 52 }}><Verdict passed={check.passed} /></td>
-            </tr>
+      {turn && turn.deterministic.length > 0 && (
+        <div className="group">
+          <h3>Deterministic checks</h3>
+          {turn.deterministic.map((check) => (
+            <div className="check" key={check.name}>
+              <span className={`dot${check.passed ? '' : check.blocking ? ' bad' : ' off'}`} />
+              <span className="body">
+                <span className="cn">{check.name}</span>
+                <span className="cd">{check.hits.length > 0 ? check.hits.join(', ') : check.detail}</span>
+              </span>
+              <span className="state">
+                <Pill tone={check.passed ? 'good' : check.blocking ? 'bad' : 'warn'}>
+                  {check.passed ? 'pass' : check.blocking ? 'fail' : 'advisory'}
+                </Pill>
+              </span>
+            </div>
           ))}
-        </tbody>
-      </table>
+        </div>
+      )}
 
-      <h3 style={{ marginTop: 16 }}>evidence per vote</h3>
-      <div className="vote-tabs">
-        <button className="vote-pill" aria-pressed={voteIndex === 'aggregate'} onClick={() => setVoteIndex('aggregate')}>
-          aggregate
-        </button>
-        {turn?.votes.map((record) => (
-          <button
-            key={record.index}
-            className="vote-pill"
-            aria-pressed={voteIndex === record.index}
-            onClick={() => setVoteIndex(record.index)}
-            title={record.error ?? undefined}
-          >
-            vote {record.index + 1}
-            {record.error
-              ? ' ✕'
-              : record.verdict
-                ? ` · ${(
-                    (record.verdict.grounding_score +
-                      record.verdict.completeness_score +
-                      record.verdict.clauses_score +
-                      record.verdict.provenance_score) /
-                    4
-                  ).toFixed(1)}`
-                : ''}
+      <div className="group">
+        <h3>Evidence per vote</h3>
+        <div className="votes-row">
+          <button className="vote-pill" aria-pressed={voteIndex === 'aggregate'} onClick={() => setVoteIndex('aggregate')}>
+            aggregate
           </button>
-        ))}
+          {turn?.votes.map((record) => (
+            <button
+              key={record.index}
+              className="vote-pill"
+              aria-pressed={voteIndex === record.index}
+              onClick={() => setVoteIndex(record.index)}
+              title={record.error ?? undefined}
+            >
+              vote {record.index + 1}
+              {record.error
+                ? ' ✕'
+                : record.verdict
+                  ? ` · ${(
+                      (record.verdict.grounding_score +
+                        record.verdict.completeness_score +
+                        record.verdict.clauses_score +
+                        record.verdict.provenance_score) /
+                      4
+                    ).toFixed(1)}`
+                  : ''}
+            </button>
+          ))}
+        </div>
+
+        {voteIndex === 'aggregate' ? (
+          <span className="faint" style={{ fontSize: 11.5, textWrap: 'pretty' }}>
+            Pick a vote to read the claims, reference facts and clauses it checked. Clicking any of them highlights the
+            quoted evidence inside the tool payload on the left.
+          </span>
+        ) : vote ? (
+          <>
+            <h3 style={{ marginTop: 6 }}>Claims — grounding</h3>
+            {vote.claims.length === 0 && <span className="faint" style={{ fontSize: 12 }}>no claims recorded</span>}
+            {vote.claims.map((claim: ClaimCheck, index) => (
+              <Claim
+                key={index}
+                status={claim.status}
+                text={claim.claim}
+                quote={claim.evidence_quote || undefined}
+                locator={claim.evidence_locator}
+                note={claim.note}
+                focus={focus}
+                onFocus={onFocus}
+              />
+            ))}
+
+            <h3 style={{ marginTop: 12 }}>Reference facts — completeness</h3>
+            {vote.facts.map((fact, index) => (
+              <Claim
+                key={index}
+                status={fact.status}
+                text={fact.fact}
+                quote={fact.evidence_quote || undefined}
+                note={fact.note}
+                focus={focus}
+                onFocus={onFocus}
+              />
+            ))}
+
+            <h3 style={{ marginTop: 12 }}>Clauses</h3>
+            {vote.clauses.length === 0 && <span className="faint" style={{ fontSize: 12 }}>none required</span>}
+            {vote.clauses.map((clause, index) => (
+              <Claim
+                key={index}
+                status={clause.status}
+                text={clause.clause}
+                quote={clause.evidence_quote || undefined}
+                note={clause.note}
+                focus={focus}
+                onFocus={onFocus}
+              />
+            ))}
+
+            <h3 style={{ marginTop: 12 }}>Provenance</h3>
+            <dl className="kv">
+              <dt>cited</dt>
+              <dd>{vote.provenance.cited_sources.join(' · ') || '—'}</dd>
+              <dt>invented</dt>
+              <dd style={{ color: vote.provenance.invented_sources.length ? 'var(--bad)' : undefined }}>
+                {vote.provenance.invented_sources.join(' · ') || 'none'}
+              </dd>
+            </dl>
+            {vote.suggestion && (
+              <div className="callout warn">
+                <strong>Suggestion</strong>
+                <div style={{ marginTop: 4 }}>{vote.suggestion}</div>
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="callout bad">this vote failed: {turn?.votes.find((r) => r.index === voteIndex)?.error}</div>
+        )}
       </div>
 
-      {voteIndex === 'aggregate' ? (
-        <p className="faint" style={{ fontSize: 12 }}>
-          Pick a vote to read its claims, facts and clauses. Clicking a claim highlights its quoted evidence inside the tool
-          payload on the left.
-        </p>
-      ) : vote ? (
-        <>
-          <h3>claims (grounding)</h3>
-          {vote.claims.map((claim, index) => (
-            <Claim key={index} claim={claim} onFocus={onFocus} />
-          ))}
-
-          <h3 style={{ marginTop: 14 }}>reference facts (completeness)</h3>
-          {vote.facts.map((fact, index) => (
-            <div className="claim" key={index}>
-              <div className="top">
-                <span className={`status ${fact.status === 'FULL' ? 'SUPPORTED' : fact.status === 'MISS' ? 'UNSUPPORTED' : 'PARTIAL'}`}>
-                  {fact.status}
-                </span>
-              </div>
-              <div className="text">{fact.fact}</div>
-              {fact.evidence_quote && <div className="ev">“{fact.evidence_quote}”</div>}
-              {fact.note && <div className="loc">{fact.note}</div>}
-            </div>
-          ))}
-
-          <h3 style={{ marginTop: 14 }}>clauses</h3>
-          {vote.clauses.length === 0 && <div className="faint" style={{ fontSize: 12 }}>none required</div>}
-          {vote.clauses.map((clause, index) => (
-            <div className="claim" key={index}>
-              <div className="top">
-                <span className={`status ${clause.status === 'PRESENT' ? 'SUPPORTED' : clause.status === 'ABSENT' ? 'UNSUPPORTED' : 'PARTIAL'}`}>
-                  {clause.status}
-                </span>
-              </div>
-              <div className="text">{clause.clause}</div>
-              {clause.evidence_quote && <div className="ev">“{clause.evidence_quote}”</div>}
-            </div>
-          ))}
-
-          <h3 style={{ marginTop: 14 }}>provenance</h3>
-          <dl className="kv">
-            <dt>cited</dt>
-            <dd>{vote.provenance.cited_sources.join(' · ') || '—'}</dd>
-            <dt>invented</dt>
-            <dd className={vote.provenance.invented_sources.length ? 'mono' : 'faint'}>
-              {vote.provenance.invented_sources.join(' · ') || 'none'}
-            </dd>
-          </dl>
-          {vote.suggestion && (
-            <div className="callout warn" style={{ marginTop: 12 }}>
-              <strong>suggestion</strong>
-              <div style={{ marginTop: 4 }}>{vote.suggestion}</div>
-            </div>
+      {(official?.explanation || official?.failure_reason) && (
+        <div className="card tight">
+          <h3>Platform judge said</h3>
+          <span className="lede">{official.failure_reason || official.explanation}</span>
+          {official.model && (
+            <span className="faint" style={{ fontSize: 11 }}>
+              {official.model}
+              {official.saw_tool_output === false && ' · its prompt carried no tool output'}
+            </span>
           )}
-        </>
-      ) : (
-        <div className="callout fail">this vote failed: {turn?.votes.find((r) => r.index === voteIndex)?.error}</div>
+        </div>
       )}
     </div>
   )
@@ -373,8 +498,8 @@ function PromptPanel({ detail }: { detail: AttemptDetail }) {
         <div className="callout warn">
           <strong>no system prompt for this attempt</strong>
           <div style={{ marginTop: 4 }}>
-            {view.trace_note || 'the trace was not available'} — traces expire quickly, so only attempts collected with a
-            live trace carry the agent's prompt.
+            {view.trace_note || 'the trace was not available'} — traces expire quickly, so only attempts collected
+            against a live trace carry the agent's prompt.
           </div>
         </div>
       ) : (
@@ -383,33 +508,43 @@ function PromptPanel({ detail }: { detail: AttemptDetail }) {
             <dt>hash</dt>
             <dd className="mono">{view.system_prompt_hash}</dd>
             <dt>source</dt>
-            <dd className="mono" style={{ fontSize: 11 }}>{view.system_prompt_source}</dd>
+            <dd className="mono">{view.system_prompt_source}</dd>
             <dt>chars</dt>
-            <dd>{num(view.system_prompt.length)}</dd>
+            <dd className="num">{num(view.system_prompt.length)}</dd>
             <dt>skill</dt>
-            <dd>{view.active_skill || '—'} {view.routing_decision && <span className="faint">→ {view.routing_decision}</span>}</dd>
+            <dd>
+              {view.active_skill || '—'}
+              {view.routing_decision && <span className="faint"> → {view.routing_decision}</span>}
+            </dd>
             <dt>tools</dt>
-            <dd className="mono" style={{ fontSize: 11 }}>{view.tools_available.join(', ') || '—'}</dd>
+            <dd className="mono">{view.tools_available.join(', ') || '—'}</dd>
           </dl>
 
           {rounds.length > 0 && (
-            <div className="filters" style={{ marginTop: 12 }}>
-              <span className="faint" style={{ fontSize: 12 }}>diff vs round</span>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+              <span className="faint" style={{ fontSize: 11.5 }}>
+                diff vs round
+              </span>
               {rounds.map((round) => (
                 <button
                   key={round}
-                  className="toggle"
+                  className="vote-pill"
                   aria-pressed={compareRound === round}
                   onClick={() => setCompareRound(compareRound === round ? null : round)}
                 >
                   r{round}
                 </button>
               ))}
+              {compareRound !== null && diff && (
+                <span className="faint" style={{ fontSize: 11 }}>
+                  {diff.every((line) => line.kind === 'same') ? 'identical' : 'differs'}
+                </span>
+              )}
             </div>
           )}
 
           {diff ? (
-            <pre className="block" style={{ marginTop: 10 }}>
+            <pre className="block">
               {diff.map((line, index) => (
                 <span key={index} className={`diff-line ${line.kind}`}>
                   {line.kind === 'add' ? '+ ' : line.kind === 'del' ? '- ' : '  '}
@@ -418,19 +553,20 @@ function PromptPanel({ detail }: { detail: AttemptDetail }) {
               ))}
             </pre>
           ) : (
-            <pre className="block" style={{ marginTop: 10 }}>{view.system_prompt}</pre>
+            <pre className="block">{view.system_prompt}</pre>
           )}
         </>
       )}
 
       {detail.view.turns[0]?.official?.prompt && (
-        <details style={{ marginTop: 14 }}>
-          <summary className="subtle" style={{ cursor: 'pointer', fontSize: 12.5 }}>
-            platform judge prompt (hash {detail.view.turns[0].official?.prompt_hash}
-            {detail.view.turns[0].official?.saw_tool_output === false && ' — carried no tool output'})
-          </summary>
-          <pre className="block" style={{ marginTop: 8 }}>{detail.view.turns[0].official?.prompt}</pre>
-        </details>
+        <div className="group">
+          <h3>Platform judge prompt</h3>
+          <span className="faint" style={{ fontSize: 11 }}>
+            hash {detail.view.turns[0].official?.prompt_hash}
+            {detail.view.turns[0].official?.saw_tool_output === false && ' — carried no tool output'}
+          </span>
+          <pre className="block">{detail.view.turns[0].official?.prompt}</pre>
+        </div>
       )}
     </div>
   )
@@ -440,65 +576,63 @@ function LlmPanel({ detail }: { detail: AttemptDetail }) {
   const { view, verdict } = detail
   return (
     <div className="inspector">
-      <h3>llm calls</h3>
-      <table className="plain">
-        <thead>
-          <tr>
-            <th>source</th>
-            <th>model</th>
-            <th className="num">in</th>
-            <th className="num">cached</th>
-            <th className="num">out</th>
-            <th className="num">ms</th>
-          </tr>
-        </thead>
-        <tbody>
+      <div className="group">
+        <h3>LLM calls</h3>
+        <div className="grid-table">
+          <div className="r head">
+            <span>Source</span>
+            <span>Model</span>
+            <span>In</span>
+            <span>Cached</span>
+            <span>Out</span>
+          </div>
           {view.llm_calls.map((call, index) => (
-            <tr key={index}>
-              <td>{call.source.replace('judge_', 'judge:')}</td>
-              <td className="mono" style={{ fontSize: 11 }}>{call.model || '—'}</td>
-              <td className="num">{num(call.input_tokens)}</td>
-              <td className="num">{num(call.cached_input_tokens)}</td>
-              <td className="num">{num(call.output_tokens)}</td>
-              <td className="num">{call.duration_ms ? Math.round(call.duration_ms) : '—'}</td>
-            </tr>
+            <div className="r" key={index}>
+              <span className="src">{call.source.replace('judge_', 'judge · ')}</span>
+              <span className="mdl">{call.model || '—'}</span>
+              <span>{num(call.input_tokens)}</span>
+              <span className="faint">{num(call.cached_input_tokens)}</span>
+              <span>{num(call.output_tokens)}</span>
+            </div>
           ))}
           {verdict?.turns.flatMap((turn) =>
             turn.votes.map((record) => (
-              <tr key={`v${turn.turn_index}-${record.index}`}>
-                <td>judge:ours vote {record.index + 1}</td>
-                <td className="mono" style={{ fontSize: 11 }}>{record.usage?.model || verdict.judge.model}</td>
-                <td className="num">{num(record.usage?.input_tokens)}</td>
-                <td className="num">{num(record.usage?.cached_input_tokens)}</td>
-                <td className="num">{num(record.usage?.output_tokens)}</td>
-                <td className="num">{record.duration_ms ? Math.round(record.duration_ms) : '—'}</td>
-              </tr>
+              <div className="r" key={`v${turn.turn_index}-${record.index}`}>
+                <span className="src">judge vote {record.index + 1}</span>
+                <span className="mdl">{record.usage?.model || verdict.judge.model}</span>
+                <span>{num(record.usage?.input_tokens)}</span>
+                <span className="faint">{num(record.usage?.cached_input_tokens)}</span>
+                <span>{num(record.usage?.output_tokens)}</span>
+              </div>
             )),
           )}
-        </tbody>
-      </table>
+        </div>
+      </div>
 
-      <h3 style={{ marginTop: 16 }}>totals</h3>
-      <dl className="kv">
+      <dl className="kv" style={{ paddingTop: 6, borderTop: '1px solid var(--line-1)' }}>
         <dt>agent tokens</dt>
-        <dd className="mono">{tokenLine(view.agent_tokens)}</dd>
+        <dd className="num">{tokenLine(view.agent_tokens)}</dd>
         <dt>our judge</dt>
-        <dd className="mono">{verdict ? tokenLine(verdict.tokens) : '—'}</dd>
+        <dd className="num">{verdict ? tokenLine(verdict.tokens) : '—'}</dd>
         <dt>agent version</dt>
-        <dd className="mono" style={{ fontSize: 11.5 }}>{view.agent_version || '—'}</dd>
+        <dd>{view.agent_version || '—'}</dd>
         <dt>wall clock</dt>
-        <dd>{ms(view.execution_time_ms)}</dd>
-        <dt>trace spans</dt>
-        <dd>{view.trace_spans ?? '—'}</dd>
+        <dd className="num">
+          {ms(view.execution_time_ms)}
+          {view.trace_spans !== null && ` · ${view.trace_spans} trace spans`}
+        </dd>
       </dl>
 
       {view.warnings.length > 0 && (
-        <>
-          <h3 style={{ marginTop: 16 }}>data caveats</h3>
+        <div className="group">
+          <h3>Data caveats</h3>
           {view.warnings.map((warning) => (
-            <div className="callout warn" key={warning} style={{ fontSize: 12 }}>{warning}</div>
+            <div className="notice" key={warning}>
+              <span className="dot" />
+              {warning}
+            </div>
           ))}
-        </>
+        </div>
       )}
     </div>
   )
@@ -508,39 +642,45 @@ function RawPanel({ detail }: { detail: AttemptDetail }) {
   const { view, raw, campaign } = detail
   return (
     <div className="inspector">
-      <h3>raw payloads</h3>
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        {(['result', 'trace', 'activity', 'verdict'] as const).map((kind) => (
-          <a
-            key={kind}
-            className="toggle"
-            href={api.rawUrl(campaign.id, view.scenario, view.round, kind)}
-            target="_blank"
-            rel="noreferrer"
-            style={{ opacity: raw[kind] ? 1 : 0.4, pointerEvents: raw[kind] ? 'auto' : 'none' }}
-          >
-            {kind}.json
-          </a>
-        ))}
+      <div className="group">
+        <h3>Raw payloads</h3>
+        <div className="raw-links">
+          {(['result', 'trace', 'activity', 'verdict'] as const).map((kind) => (
+            <a
+              key={kind}
+              className="vote-pill"
+              aria-disabled={!raw[kind]}
+              href={api.rawUrl(campaign.id, view.scenario, view.round, kind)}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {kind}.json
+            </a>
+          ))}
+        </div>
       </div>
-      <h3 style={{ marginTop: 16 }}>identifiers</h3>
-      <dl className="kv">
-        <dt>scenario</dt>
-        <dd className="mono" style={{ fontSize: 11.5 }}>{view.scenario}</dd>
-        <dt>result id</dt>
-        <dd className="mono" style={{ fontSize: 11.5 }}>{view.result_id || '—'}</dd>
-        <dt>communication</dt>
-        <dd className="mono" style={{ fontSize: 11.5 }}>{view.communication_id || '—'}</dd>
-        <dt>snapshot</dt>
-        <dd className="mono" style={{ fontSize: 11.5 }}>{view.snapshot_id || '—'}</dd>
-        <dt>created</dt>
-        <dd>{view.created_at || '—'}</dd>
-      </dl>
+
+      <div className="group">
+        <h3>Identifiers</h3>
+        <dl className="kv">
+          <dt>scenario</dt>
+          <dd className="mono">{view.scenario}</dd>
+          <dt>result id</dt>
+          <dd className="mono">{view.result_id || '—'}</dd>
+          <dt>communication</dt>
+          <dd className="mono">{view.communication_id || '—'}</dd>
+          <dt>snapshot</dt>
+          <dd className="mono">{view.snapshot_id || '—'}</dd>
+          <dt>created</dt>
+          <dd>{view.created_at || '—'}</dd>
+        </dl>
+      </div>
+
       {view.applied_mocks.length > 0 && (
-        <>
-          <h3 style={{ marginTop: 16 }}>mocks applied at runtime</h3>
-          <pre className="block">{JSON.stringify(view.applied_mocks.map((m) => m.tool_name ?? m), null, 1)}</pre>
-        </>
+        <div className="group">
+          <h3>Mocks applied at runtime</h3>
+          <JsonValue value={view.applied_mocks} />
+        </div>
       )}
     </div>
   )
@@ -550,8 +690,11 @@ export default function Attempt({ id, scenario, round }: { id: string; scenario:
   const { data, error, loading } = useAsync(() => api.attempt(id, scenario, round), [id, scenario, round])
   const [tab, setTab] = useState<Tab>('verdict')
   const [focus, setFocus] = useState<Focus | null>(null)
-  const [openTools, setOpenTools] = useState<Set<string>>(new Set())
-  const listRef = useRef<HTMLDivElement>(null)
+
+  const turnScores = useMemo(
+    () => new Map((data?.verdict?.turns ?? []).map((turn) => [turn.turn_index, turn.score])),
+    [data],
+  )
 
   const siblings: Sibling[] = data?.siblings ?? []
   const position = siblings.findIndex((item) => item.scenario === scenario && item.round === round)
@@ -574,7 +717,6 @@ export default function Attempt({ id, scenario, round }: { id: string; scenario:
 
   useEffect(() => {
     setFocus(null)
-    setOpenTools(new Set())
   }, [scenario, round])
 
   if (error) return <div className="page"><ErrorBox error={error} /></div>
@@ -585,12 +727,10 @@ export default function Attempt({ id, scenario, round }: { id: string; scenario:
 
   return (
     <div className="attempt">
-      <div className="pane left" ref={listRef}>
-        <div className="pane-head">
-          <span className="faint" style={{ fontSize: 11.5 }}>
-            {siblings.length} attempts · <kbd>j</kbd>/<kbd>k</kbd>
-          </span>
-        </div>
+      <div className="pane left">
+        <span className="rail-head">
+          {siblings.length} attempts · <kbd>j</kbd> <kbd>k</kbd>
+        </span>
         {siblings.map((sibling) => {
           const current = sibling.scenario === scenario && sibling.round === round
           const mismatch = sibling.ours !== null && sibling.official !== null && sibling.ours !== sibling.official
@@ -601,54 +741,34 @@ export default function Attempt({ id, scenario, round }: { id: string; scenario:
               aria-current={current}
               href={`#/c/${encodeURIComponent(id)}/a/${encodeURIComponent(sibling.scenario)}/${sibling.round}`}
             >
-              <span
-                className={`dot ${
-                  sibling.score === null || sibling.score === undefined
-                    ? 'none'
-                    : sibling.score >= 4
-                      ? 'pass'
-                      : sibling.score >= 3
-                        ? 'warn'
-                        : 'fail'
-                }`}
-              />
+              <span className={`dot ${scoreTone(sibling.score)}`} />
               <span className="name">{sibling.short}</span>
               <span className="r">r{sibling.round}</span>
-              {sibling.score !== null && sibling.score !== undefined && (
-                <span className="r" style={{ marginLeft: 'auto' }}>{sibling.score.toFixed(1)}</span>
-              )}
               {mismatch && <span className="mismatch">≠</span>}
+              {sibling.score !== null && sibling.score !== undefined && (
+                <span className="s">{sibling.score.toFixed(1)}</span>
+              )}
             </a>
           )
         })}
       </div>
 
       <div className="pane center">
-        <div className="pane-head">
-          <Chip mono>{view.short} · round {view.round}</Chip>
+        <div className="attempt-head">
+          <Pill tone="solid" mono>
+            {view.short} · round {view.round}
+          </Pill>
           {data.verdict && <Score value={data.verdict.score} />}
-          <Verdict passed={view.official_passed} label="official" />
-          {view.agent_model && <Chip mono>{view.agent_model}</Chip>}
+          <Verdict passed={view.official_passed} label="platform" />
+          {view.agent_model && <Pill mono>{view.agent_model}</Pill>}
           <span className="spacer" />
           {focus && (
-            <button className="icon-button" onClick={() => setFocus(null)}>
+            <button className="ghost" onClick={() => setFocus(null)}>
               clear highlight
             </button>
           )}
         </div>
-        <Conversation
-          turns={view.turns}
-          focus={focus}
-          openTools={openTools}
-          toggleTool={(key) =>
-            setOpenTools((current) => {
-              const next = new Set(current)
-              if (next.has(key)) next.delete(key)
-              else next.add(key)
-              return next
-            })
-          }
-        />
+        <Conversation turns={view.turns} focus={focus} scores={turnScores} />
       </div>
 
       <div className="pane right">
@@ -659,7 +779,7 @@ export default function Attempt({ id, scenario, round }: { id: string; scenario:
             </button>
           ))}
         </div>
-        {tab === 'verdict' && <VerdictPanel detail={data} onFocus={setFocus} />}
+        {tab === 'verdict' && <VerdictPanel detail={data} focus={focus} onFocus={setFocus} />}
         {tab === 'prompt' && <PromptPanel detail={data} />}
         {tab === 'llm' && <LlmPanel detail={data} />}
         {tab === 'raw' && <RawPanel detail={data} />}

@@ -24,15 +24,14 @@ export function go(path: string): void {
   window.location.hash = path
 }
 
+/** Dark is the design's canonical look, so it is also the default. */
 function useTheme(): [string, () => void] {
-  const [theme, setTheme] = useState<string>(() => localStorage.getItem('evalkit-theme') || 'system')
+  const [theme, setTheme] = useState<string>(() => localStorage.getItem('evalkit-theme') || 'dark')
   useEffect(() => {
-    const root = document.documentElement
-    if (theme === 'system') root.removeAttribute('data-theme')
-    else root.setAttribute('data-theme', theme)
+    document.documentElement.setAttribute('data-theme', theme)
     localStorage.setItem('evalkit-theme', theme)
   }, [theme])
-  const cycle = () => setTheme((current) => (current === 'system' ? 'light' : current === 'light' ? 'dark' : 'system'))
+  const cycle = () => setTheme((current) => (current === 'dark' ? 'light' : current === 'light' ? 'system' : 'dark'))
   return [theme, cycle]
 }
 
@@ -72,8 +71,8 @@ export default function App() {
           )}
         </nav>
         <span className="spacer" />
-        <button className="icon-button" onClick={cycleTheme} title="light / dark / system">
-          {theme === 'system' ? 'auto' : theme}
+        <button className="ghost" onClick={cycleTheme} title="dark / light / system">
+          {theme}
         </button>
       </header>
 

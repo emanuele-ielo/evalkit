@@ -4,7 +4,8 @@ Kit di eval **nostro** per gli agenti Wonderful. `wful` è il motore (runna scen
 legge tracce, fetcha result e activity); tutto il resto è nostro: raccolta,
 rubrica a voti 1-5, metriche, dashboard locale.
 
-Prossimo lavoro concordato con Emanuele: **re-vamp UX/UI della dashboard** (§6).
+Ultimo lavoro: **revamp UX/UI della dashboard** sul design system Wonderful (§6).
+Aperto: la vista **compare** fra campagne (§8) e i giudizi opzionali (§4).
 
 ---
 
@@ -80,7 +81,7 @@ e la UI lo dice esplicitamente invece di mostrarli come "non giudicati".
 
 | id | agente | rubrica | stato |
 |---|---|---|---|
-| `baseline-fase5d` | gpt-5.5 (snapshot `42968f53`) | **v1** | 129/129 giudicati pass/fail — da rigiudicare in v2 (~43 $ interi, ~14 $ solo round 1) |
+| `baseline-fase5d` | gpt-5.5 (snapshot `42968f53`) | **v1** | 129 verdetti pass/fail su disco, illeggibili sulla scala v2: il report li conta come **non giudicati** e la UI li mostra come legacy. Da rigiudicare (~43 $ interi, ~14 $ solo round 1) |
 | `luna-43x3` | gpt-5.6-luna (snapshot `17a4aab7`) | **v2** | 129 raccolti, **43 giudicati (solo round 1)**; round 2-3 su disco non giudicati (~28 $) |
 | `luna-smoke` | gpt-5.6-luna | v1 | 1 attempt (scenario oracle g020) |
 
@@ -109,37 +110,47 @@ fondatezza. Con solo grounding sarebbe 31/43.
 Luna costa ~0,37 $ contro ~9,90 $ per 129 conversazioni (**27× meno**). Per dire
 *quanto* e *dove* perde sulla scala 1-5 serve la baseline round 1 in v2 (~14 $).
 
-## 6. Re-vamp UX/UI — punto di partenza
+## 6. UX/UI — rifatta sul design system Wonderful (2026-08-12)
 
-**Com'è ora.** Tre viste (`dashboard/src/views/`): `Campaigns.tsx` (griglia di
-card), `Campaign.tsx` (stat + criteri + tassonomia + matrice scenari×round),
-`Attempt.tsx` (tre pannelli: lista tentativi con `j`/`k` · conversazione con tool
-call espandibili args↔payload · inspector a 4 tab verdict/prompt/llm/raw).
-Design system in `src/styles.css`: token CSS, light di base e dark ridefinito su
-`prefers-color-scheme` + toggle `data-theme`; nessun framework; pill `Score`
-colorata verde ≥4 / ambra 3-4 / rosso <3.
+Base: il mockup `Eval dashboard UI redesign.zip` fornito da Emanuele. Design
+system = quello aziendale approvato (`--w-*`), riportato a scala app in
+`dashboard/src/styles.css`. **Dark è la versione canonica** (la palette è bianco
+in alpha su nero) ed è il default; light rimappa gli stessi ruoli a nero in alpha
+su bianco, `system` segue l'OS. Font ABC Favorit Light + Inter variable
+bundlati in `dashboard/public/fonts/` (nessuna richiesta esterna).
 
-**Cosa so già che è debole**, in ordine di quanto mi dà fastidio:
+**Cosa risponde adesso la dashboard**: *dove perde punti l'agente*. I criteri e
+la tassonomia sono la spina dorsale; il compare fra campagne resta l'unico pezzo
+del brief non costruito (§8).
 
-1. La **matrice** è una tabella piatta: non si ordina, non si vede la
-   distribuzione dei criteri per riga, e con 43×3 celle il colpo d'occhio manca.
-2. L'**inspector** è denso e obbliga a cambiare tab: le accuse dei singoli voti
-   stanno dietro un vote picker, e il collegamento claim→evidenza (che funziona)
-   non è scopribile.
-3. **Manca la vista compare**: stesso scenario su più campagne/round affiancati.
-   Era nel brief, non l'ho costruita — ed è esattamente ciò che serve per
-   Luna-vs-gpt-5.5.
-4. Il **voto non è mai spiegato visivamente**: c'è il numero e la tabella dei
-   criteri, ma non un grafico che mostri dove si perde (radar/barre per criterio
-   a livello di attempt).
-5. La **live feed** è un log grezzo; durante un run non comunica progresso reale.
-6. Nessun layout stretto testato; la vista Attempt sotto 1100px degrada.
-7. La tassonomia è una lista di barre: non è cliccabile per filtrare la matrice.
+Nuovi moduli:
 
-Prima di ridisegnare va deciso **qual è la domanda principale** che la dashboard
-deve rispondere in tre secondi. Candidate: "questo modello è meglio del
-precedente?" (→ compare come vista di primo livello) oppure "dove perde punti
-l'agente?" (→ criteri e tassonomia come spina dorsale, matrice secondaria).
+- `components/json.tsx` — rende **qualsiasi** payload di tool come lettura, non
+  come dump JSON. Non sa nulla del corpus Vera: deduce dai valori (stringa corta
+  → badge, prima stringa media → titolo, stringhe lunghe → prosa, array di
+  primitivi → chip, array di oggetti → card, mappe di booleani → flag, catene a
+  chiave singola tipo `source › version` → una riga). Cap a 5 righe con
+  espansione, che si apre da sola se l'evidenza cercata sta in una riga nascosta.
+- `components/md.tsx` — markdown minimo (grassetto, `code`, «», liste). Prima le
+  risposte mostravano i `**` grezzi. I `**` devono essere esattamente due, o le
+  maschere tipo `**334**********` mandano in grassetto mezza frase.
+- `lib/lede.ts` — da un verdetto ricava **una diagnosi in una riga** ("HALF AN
+  ANSWER — The payload answered it, the answer did not"). Ogni titolo è vincolato
+  alla condizione che descrive; la prosa sotto è sempre la spiegazione del
+  giudice. Nessun testo inventato.
+
+Le sette debolezze di partenza: risolte 1 (tabella ordinabile, round come pill
+colorate), 2 (lede + claim cliccabili con hint visibile, riga del payload
+cerchiata e marcata "judge quoted this row"), 4 (barre per criterio con tono
+colore), 5 (feed dentro "Run internals" richiudibile), 6 (sotto 980px impila,
+nessun overflow orizzontale), 7 (tassonomia cliccabile che filtra la tabella).
+Resta aperta la 3 (compare).
+
+**Un bug di onestà trovato durante il revamp**: le campagne giudicate con rubrica
+v1 mostravano `0.00 / 5`, perché `mean_score` è un default pydantic e non una
+misura. Ora c'è `hasScores()` in `components/bits.tsx` — una media su scala 1-5
+non può valere 0 — e quelle campagne mostrano "—" più la pass-rate reale e il
+comando per rigiudicare.
 
 ## 7. Guardrail
 
@@ -148,3 +159,16 @@ MAI workspace General. Piattaforma read-only tranne `eval run` (+`agents
 snapshot`), imposto dall'allowlist in `wful.py`. Chiavi lette a runtime, mai
 stampate né salvate. `data/` gitignored. Repo evalkit: git **locale**, nessun
 remote. Niente merge su main dell'agente senza decisione esplicita.
+
+## 8. Cosa manca
+
+- **Vista compare**: stesso scenario su più campagne affiancate. È ciò che serve
+  per chiudere Luna-vs-gpt-5.5 sulla scala 1-5. L'API `/api/compare?base=&other=`
+  esiste già lato server e non è ancora usata dalla UI; la sezione "Where we
+  disagree with the platform judge" è l'unico confronto presente.
+- **Giudizi non ancora fatti** (nessuno lanciato senza ok esplicito): baseline
+  round 1 in v2 (~14 $) per confrontare Luna e gpt-5.5 a voti; Luna round 2-3
+  (~28 $) per la flakiness; baseline intera in v2 (~43 $).
+- **Rubrica**: catturare le citazioni di *nomi di tool interni* come fonte (Luna
+  ha citato "lookup canale Interforze"; il giudice di piattaforma lo prende, noi
+  no). Non implementato per non rompere la comparabilità a metà misura.

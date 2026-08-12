@@ -1,29 +1,66 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api, useAsync, useCampaignEvents } from '../api'
-import { Bar, Chip, Empty, ErrorBox, Score, Stat, ago, num, tokenLine } from '../components/bits'
-import type { MatrixCell, MatrixRow } from '../types'
+import { Empty, ErrorBox, Pill, Score, Tag, ago, hasScores, num, scoreTone, tokenLine } from '../components/bits'
+import type { MatrixCell, MatrixRow, ScenarioOutcome } from '../types'
 
 type Filter = 'all' | 'failing' | 'flaky' | 'disagree' | 'unjudged'
+type SortKey = 'scenario' | 'score' | 'official'
 
-function cellClass(cell: MatrixCell | undefined): string {
-  if (!cell) return 'cell unjudged'
-  if (cell.status === 'running') return 'cell running'
-  if (cell.status === 'error') return 'cell error'
-  if (cell.score !== null && cell.score !== undefined) {
-    const tone = cell.score >= 4 ? 'pass' : cell.score >= 3 ? 'error' : 'fail'
-    return `cell scored ${tone}`
+const FILTERS: Filter[] = ['all', 'failing', 'flaky', 'disagree', 'unjudged']
+
+function RoundPill({ round, cell }: { round: number; cell: MatrixCell | undefined }) {
+  if (!cell) return <span className="rpill">r{round}</span>
+  if (cell.status === 'error') {
+    return (
+      <span className="rpill err" title={cell.error ?? 'error'}>
+        r{round}
+      </span>
+    )
   }
-  return 'cell unjudged'
+  if (cell.status === 'running') {
+    return (
+      <span className="rpill" title="in flight">
+        r{round}···
+      </span>
+    )
+  }
+  const tone = scoreTone(cell.score)
+  const official = cell.official === null ? '—' : cell.official ? 'pass' : 'fail'
+  return (
+    <span
+      className={`rpill ${tone === 'none' ? '' : tone}`}
+      title={`${cell.score === null ? 'not judged' : `${cell.score.toFixed(2)}/5`} · platform ${official}`}
+    >
+      r{round}
+    </span>
+  )
 }
 
-function cellLabel(cell: MatrixCell | undefined): string {
-  if (!cell) return '·'
-  if (cell.status === 'running') return '···'
-  if (cell.status === 'error') return 'err'
-  if (cell.score !== null && cell.score !== undefined) return cell.score.toFixed(1)
-  if (cell.official === true) return '(pass)'
-  if (cell.official === false) return '(fail)'
-  return '·'
+/** Official verdict against ours, for one scenario across its rounds. */
+function Agreement({ outcome }: { outcome: ScenarioOutcome | undefined }) {
+  if (!outcome || outcome.our_majority === null) {
+    return <span className="agree faint">not judged</span>
+  }
+  if (outcome.stability === 'flaky') {
+    return (
+      <span className="agree" style={{ color: 'var(--warn)' }} title="passes in some rounds and not others">
+        flaky
+      </span>
+    )
+  }
+  const ours = outcome.our_majority
+  const official = outcome.official_majority
+  if (official === null) {
+    return <span className="agree faint">— / {ours ? 'pass' : 'fail'}</span>
+  }
+  const disagree = ours !== official
+  const color = disagree ? 'var(--info)' : ours ? 'var(--good)' : 'var(--bad)'
+  return (
+    <span className="agree" style={{ color }} title={disagree ? 'we disagree with the platform judge' : undefined}>
+      {official ? 'pass' : 'fail'} / {ours ? 'pass' : 'fail'}
+      {disagree ? ' ≠' : ''}
+    </span>
+  )
 }
 
 export default function Campaign({ id }: { id: string }) {
@@ -31,20 +68,30 @@ export default function Campaign({ id }: { id: string }) {
   const { data, error, loading, reload } = useAsync(() => api.campaign(id, true), [id])
   const diff = useAsync(() => api.officialDiff(id), [id, tick])
   const [filter, setFilter] = useState<Filter>('all')
+  const [tagFilter, setTagFilter] = useState<string | null>(null)
   const [query, setQuery] = useState('')
+  const [sort, setSort] = useState<{ key: SortKey; dir: 'asc' | 'desc' }>({ key: 'scenario', dir: 'asc' })
+  const [internals, setInternals] = useState(false)
 
-  // A landing attempt (live run or judge pass) refreshes the matrix.
+  // A landing attempt (live run or judge pass) refreshes the table.
   useEffect(() => {
     if (tick > 0) reload()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tick])
 
+  const outcomes = useMemo(
+    () => new Map((data?.report.scenarios ?? []).map((scenario) => [scenario.scenario, scenario])),
+    [data],
+  )
+
   const rows: MatrixRow[] = useMemo(() => {
     if (!data) return []
-    const outcomes = new Map(data.report.scenarios.map((scenario) => [scenario.scenario, scenario]))
-    return data.matrix.filter((row) => {
-      if (query && !row.short.includes(query) && !row.scenario.includes(query)) return false
+    const kept = data.matrix.filter((row) => {
+      if (query && !row.short.toLowerCase().includes(query.toLowerCase()) && !row.scenario.toLowerCase().includes(query.toLowerCase())) {
+        return false
+      }
       const outcome = outcomes.get(row.scenario)
+      if (tagFilter && !(outcome?.taxonomy ?? []).includes(tagFilter)) return false
       const cells = Object.values(row.cells)
       switch (filter) {
         case 'failing':
@@ -54,310 +101,449 @@ export default function Campaign({ id }: { id: string }) {
         case 'disagree':
           return cells.some((cell) => cell.ours !== null && cell.official !== null && cell.ours !== cell.official)
         case 'unjudged':
-          return cells.some((cell) => cell.ours === null)
+          return cells.some((cell) => cell.score === null)
         default:
           return true
       }
     })
-  }, [data, filter, query])
+    const sign = sort.dir === 'asc' ? 1 : -1
+    return [...kept].sort((a, b) => {
+      if (sort.key === 'scenario') return sign * a.short.localeCompare(b.short)
+      if (sort.key === 'score') {
+        const left = outcomes.get(a.scenario)?.score
+        const right = outcomes.get(b.scenario)?.score
+        if (left === null || left === undefined) return 1
+        if (right === null || right === undefined) return -1
+        return sign * (left - right)
+      }
+      const rank = (row: MatrixRow) => {
+        const outcome = outcomes.get(row.scenario)
+        if (!outcome || outcome.our_majority === null) return 4
+        if (outcome.stability === 'flaky') return 2
+        if (outcome.official_majority !== null && outcome.our_majority !== outcome.official_majority) return 1
+        return outcome.our_majority ? 3 : 0
+      }
+      return sign * (rank(a) - rank(b))
+    })
+  }, [data, filter, tagFilter, query, sort, outcomes])
 
   if (error) return <div className="page"><ErrorBox error={error} /></div>
   if (loading && !data) return <div className="page"><Empty>loading…</Empty></div>
   if (!data) return null
 
   const { report, manifest, rounds } = data
-  const outcomes = new Map(report.scenarios.map((scenario) => [scenario.scenario, scenario]))
-  const running = manifest ? Object.values(data.matrix).some((row) => Object.values(row.cells).some((cell) => cell.status === 'running')) : false
+  const scored = hasScores(report)
+  const running = data.matrix.some((row) => Object.values(row.cells).some((cell) => cell.status === 'running'))
+  const unjudged = report.attempts_collected - report.attempts_judged
+  const judgedRoundsMax = Math.max(0, ...report.scenarios.map((scenario) => scenario.judged_rounds))
+  const flaky = report.scenarios.filter((scenario) => scenario.stability === 'flaky').length
+  const taxonomy = Object.entries(report.taxonomy).sort((a, b) => b[1] - a[1])
+  const taxonomyTop = taxonomy.length > 0 ? taxonomy[0][1] : 1
+
+  const sortHeader = (key: SortKey, label: string) => (
+    <button
+      onClick={() => setSort((current) => ({ key, dir: current.key === key && current.dir === 'asc' ? 'desc' : 'asc' }))}
+      title={`sort by ${label}`}
+    >
+      {label}
+      {sort.key === key && <span className="arrow">{sort.dir === 'asc' ? ' ↑' : ' ↓'}</span>}
+    </button>
+  )
 
   return (
     <div className="page">
-      <div className="section-head">
-        <div>
+      <div className="run-head">
+        <div className="titles">
           <h1>{manifest.label}</h1>
-          <div className="faint mono" style={{ fontSize: 12 }}>
-            {manifest.id} · {manifest.kind} · updated {ago(manifest.updated_at || manifest.created_at)}
+          <div className="meta">
+            {manifest.agent_model && <Pill mono>{manifest.agent_model}</Pill>}
+            {manifest.batch && <Pill mono>batch {manifest.batch}</Pill>}
+            {report.judge && (
+              <Pill mono>
+                judge {report.judge.model} ×{report.judge.votes} · rubric {report.judge.rubric_version}
+              </Pill>
+            )}
+            {manifest.snapshot_id && <Pill mono>snapshot {manifest.snapshot_id.slice(0, 8)}</Pill>}
+            {manifest.agent_commit_sha && <Pill mono>commit {manifest.agent_commit_sha.slice(0, 7)}</Pill>}
           </div>
         </div>
         <span className="spacer" />
-        {running && <Chip tone="accent"><span className="pulse" /> live</Chip>}
-        <button className="icon-button" onClick={reload}>refresh</button>
+        <Pill tone={running ? 'good' : 'default'}>
+          {running && <span className="pulse" />}
+          {running ? 'live · ' : ''}
+          updated {ago(manifest.updated_at || manifest.created_at)}
+        </Pill>
+        <button className="button" onClick={reload}>
+          Refresh
+        </button>
       </div>
 
-      <div className="meta" style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 16 }}>
-        {manifest.target && <Chip mono>{manifest.target.slug}</Chip>}
-        {manifest.agent_model && <Chip mono>agent {manifest.agent_model}</Chip>}
-        {manifest.agent_commit_sha && <Chip mono>commit {manifest.agent_commit_sha.slice(0, 7)}</Chip>}
-        {manifest.snapshot_id && <Chip mono title="agent_repo_snapshot_id">snapshot {manifest.snapshot_id.slice(0, 8)}</Chip>}
-        {manifest.batch && <Chip mono>batch {manifest.batch}</Chip>}
-        {report.judge && (
-          <Chip mono>
-            judge {report.judge.model} ×{report.judge.votes} · rubric {report.judge.rubric_version} · effort{' '}
-            {report.judge.reasoning_effort}
-          </Chip>
-        )}
+      <div className="stat-row">
+        <div className="stat" title="mean of the four criteria, median across votes">
+          <span className="k">Mean score</span>
+          <span className="hero-num">
+            {scored ? report.mean_score.toFixed(2) : '—'}
+            {scored && <small> / 5</small>}
+          </span>
+          <span className="foot">
+            {scored
+              ? `mean of ${report.attempts_judged} judged attempts`
+              : report.attempts_judged > 0
+                ? `rubric ${report.judge?.rubric_version ?? 'v1'} — pass/fail, not scored`
+                : 'nothing judged yet'}
+          </span>
+        </div>
+
+        <div
+          className="stat"
+          title={
+            scored
+              ? `scenarios at or above ${report.judge?.pass_threshold ?? 4}/5 in every judged round`
+              : 'scenarios the judge passed in every judged round'
+          }
+        >
+          <span className="k">Pass — every round</span>
+          <span className="hero-num">
+            {report.our_all_pass}
+            <small> / {report.scenarios_total}</small>
+          </span>
+          <span
+            className={`foot${
+              report.attempts_judged === 0 || report.our_all_pass === report.official_all_pass
+                ? ''
+                : report.our_all_pass > report.official_all_pass
+                  ? ' up'
+                  : ' down'
+            }`}
+          >
+            {report.attempts_judged === 0
+              ? `the platform judge passed ${report.official_all_pass}`
+              : report.our_all_pass === report.official_all_pass
+                ? 'same as the platform judge'
+                : `${report.our_all_pass > report.official_all_pass ? '+' : ''}${report.our_all_pass - report.official_all_pass} vs platform judge`}
+          </span>
+        </div>
+
+        <div className="stat" title="scenarios that pass in some rounds and fail in others">
+          <span className="k">Flaky</span>
+          <span className="hero-num">
+            {judgedRoundsMax > 1 ? flaky : '—'}
+            {judgedRoundsMax > 1 && <small> / {report.scenarios_total}</small>}
+          </span>
+          <span className="foot">
+            {judgedRoundsMax > 1
+              ? 'score varies across rounds'
+              : judgedRoundsMax === 1
+                ? 'one round judged — flakiness needs more'
+                : 'nothing judged yet'}
+          </span>
+        </div>
+
+        <div className="stat" title="how often our verdict matches the platform judge on the same attempt">
+          <span className="k">Judge agreement</span>
+          <span className="hero-num">
+            {diff.data?.agreement_rate != null ? Math.round(diff.data.agreement_rate * 100) : '—'}
+            {diff.data?.agreement_rate != null && <small>%</small>}
+          </span>
+          <span className="foot">ours vs platform, {report.attempts_judged} judged</span>
+        </div>
       </div>
 
-      <div className="stat-grid">
-        <Stat
-          k="score (mean of attempts)"
-          v={report.mean_score ? report.mean_score.toFixed(2) : '—'}
-          of={5}
-          hint="mean of the four criteria, median across votes"
-        />
-        <Stat
-          k="above threshold (ours)"
-          v={report.our_majority_pass}
-          of={report.scenarios_total}
-          delta={{ value: report.our_majority_pass - report.official_majority_pass }}
-          hint={`scenarios scoring >= ${report.judge?.pass_threshold ?? 4} in more than half their rounds`}
-        />
-        <Stat k="any round" v={report.our_any_pass} of={report.scenarios_total} delta={{ value: report.our_any_pass - report.official_any_pass }} />
-        <Stat k="every round" v={report.our_all_pass} of={report.scenarios_total} delta={{ value: report.our_all_pass - report.official_all_pass }} />
-        <Stat k="attempts passed" v={report.our_pass_attempts} of={report.attempts_judged} hint="individual attempts, ours" />
-        <Stat k="judged" v={report.attempts_judged} of={report.attempts_total} />
-        <Stat
-          k="judge agreement"
-          v={diff.data?.agreement_rate != null ? `${Math.round(diff.data.agreement_rate * 100)}%` : '—'}
-          hint="how often our verdict matches the platform judge on the same attempt"
-        />
-      </div>
-
-      {report.notes.length > 0 && (
-        <div className="section">
-          {report.notes.map((note) => (
-            <div key={note} className="callout warn">
-              {note}
-            </div>
-          ))}
+      {unjudged > 0 && (
+        <div className="notice">
+          <span className="dot" />
+          {num(unjudged)} collected {unjudged === 1 ? 'attempt' : 'attempts'} not judged yet — every number here covers
+          the {report.attempts_judged} that are.
         </div>
       )}
+      {!scored && report.attempts_judged > 0 && (
+        <div className="notice">
+          <span className="dot" />
+          <span>
+            Judged with rubric {report.judge?.rubric_version ?? 'v1'}, which was pass/fail — a pass cannot be turned
+            into a score without inventing one. Re-judge to put this run on the 1–5 scale:{' '}
+            <code className="cmd">evalkit judge {manifest.id} --force</code>
+          </span>
+        </div>
+      )}
+      {report.notes
+        .filter((note) => !(unjudged > 0 && /not judged yet/i.test(note)))
+        .map((note) => (
+        <div className="notice" key={note}>
+          <span className="dot" />
+          {note}
+        </div>
+      ))}
 
-      <div className="card-row section" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))' }}>
+      <div className="card-row">
         <div className="card">
-          <h3>criteria — mean score out of 5</h3>
-          {report.criteria.length === 0 && <div className="faint">nothing judged yet</div>}
-          {report.criteria.map((criterion) => (
-            <div key={criterion.name} className="bar-row">
-              <div className="name">{criterion.name}</div>
-              <div className="bar-track">
-                <div
-                  className={`bar-fill${criterion.mean_score >= 4 ? ' pass' : ''}`}
-                  style={{ width: `${(criterion.mean_score / 5) * 100}%` }}
-                />
+          <h3>{scored ? 'Criteria — mean of 5' : 'Criteria — share of attempts passing'}</h3>
+          {report.criteria.length === 0 && <span className="faint">nothing judged yet</span>}
+          {report.criteria.map((criterion) => {
+            // A pass/fail rubric has no per-criterion score, only a pass rate.
+            const rate = criterion.attempts_judged > 0 ? criterion.attempts_passed / criterion.attempts_judged : 0
+            const width = scored ? (criterion.mean_score / 5) * 100 : rate * 100
+            const tone = scored
+              ? scoreTone(criterion.mean_score)
+              : rate >= 0.75
+                ? 'good'
+                : rate >= 0.4
+                  ? 'warn'
+                  : 'bad'
+            return (
+              <div className="bar-row" key={criterion.name}>
+                <span className="name">{criterion.name}</span>
+                <span className="bar-track">
+                  <span className={`bar-fill ${tone === 'none' ? '' : tone}`} style={{ width: `${width}%` }} />
+                </span>
+                <span className="val">
+                  {scored ? criterion.mean_score.toFixed(2) : `${Math.round(rate * 100)}%`}
+                </span>
               </div>
-              <div className="val">{criterion.mean_score.toFixed(2)}/5</div>
-            </div>
-          ))}
+            )
+          })}
           {Object.keys(report.score_distribution).length > 0 && (
-            <div style={{ marginTop: 12 }}>
-              <h3>attempts by score</h3>
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                {Object.entries(report.score_distribution).map(([score, count]) => (
-                  <Chip key={score} tone={Number(score) >= 4 ? 'pass' : Number(score) >= 3 ? 'warn' : 'fail'}>
+            <div className="dist">
+              {Object.entries(report.score_distribution)
+                .sort((a, b) => Number(a[0]) - Number(b[0]))
+                .map(([score, count]) => (
+                  <Pill key={score} tone={Number(score) >= 4 ? 'good' : Number(score) >= 3 ? 'warn' : 'bad'}>
                     {score}★ · {count}
-                  </Chip>
+                  </Pill>
                 ))}
-              </div>
             </div>
           )}
           {Object.keys(report.coverage).length > 0 && (
-            <div style={{ marginTop: 12 }}>
-              <h3>reference-fact coverage</h3>
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                {Object.entries(report.coverage).map(([key, value]) => (
-                  <Chip key={key} tone={key === 'FULL' ? 'pass' : key === 'MISS' ? 'fail' : 'warn'}>
-                    {key} {value}
-                  </Chip>
-                ))}
-              </div>
+            <div className="dist">
+              {Object.entries(report.coverage).map(([key, value]) => (
+                <Pill key={key} tone={key === 'FULL' ? 'good' : key === 'MISS' ? 'bad' : 'warn'}>
+                  reference facts {key.toLowerCase()} · {value}
+                </Pill>
+              ))}
             </div>
           )}
         </div>
 
         <div className="card">
-          <h3>failure taxonomy</h3>
-          {Object.keys(report.taxonomy).length === 0 && <div className="faint">nothing judged yet</div>}
-          {Object.entries(report.taxonomy).slice(0, 10).map(([tag, count]) => (
-            <Bar key={tag} name={tag} value={count} total={report.attempts_judged || 1} />
-          ))}
-          {Object.keys(report.deterministic_failures).length > 0 && (
-            <div style={{ marginTop: 12 }}>
-              <h3>deterministic checks failing</h3>
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                {Object.entries(report.deterministic_failures).map(([name, count]) => (
-                  <Chip key={name} tone="warn" mono>
-                    {name} {count}
-                  </Chip>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-
-        <div className="card">
-          <h3>cost & data coverage</h3>
-          <dl className="kv">
-            <dt>judge tokens</dt>
-            <dd className="mono">{tokenLine(report.tokens)}</dd>
-            <dt>agent tokens</dt>
-            <dd className="mono">{tokenLine(report.agent_tokens)}</dd>
-            <dt>traces</dt>
-            <dd>
-              {report.trace_coverage}/{report.attempts_collected}
-              {report.trace_coverage < report.attempts_collected && (
-                <span className="faint"> · expired ones have no system prompt</span>
+          <div className="card-head" onClick={() => setInternals((open) => !open)}>
+            <h3>Run internals</h3>
+            <span className="faint" style={{ fontSize: 11 }}>
+              tokens · coverage · feed
+            </span>
+            <span className="spacer" />
+            <span className="glyph">{internals ? '−' : '+'}</span>
+          </div>
+          {internals ? (
+            <>
+              <dl className="kv">
+                <dt>judge tokens</dt>
+                <dd className="num">{tokenLine(report.tokens)}</dd>
+                <dt>agent tokens</dt>
+                <dd className="num">{tokenLine(report.agent_tokens)}</dd>
+                <dt>traces</dt>
+                <dd className="num">
+                  {report.trace_coverage}/{report.attempts_collected}
+                  {report.trace_coverage < report.attempts_collected && ' · expired ones carry no system prompt'}
+                </dd>
+                <dt>activities</dt>
+                <dd className="num">
+                  {report.activity_coverage}/{report.attempts_collected}
+                </dd>
+                <dt>per round</dt>
+                <dd className="num">
+                  {Object.entries(report.per_round_pass)
+                    .map(([round, passes]) => `r${round}: ${passes}`)
+                    .join(' · ') || '—'}
+                </dd>
+                {Object.keys(report.deterministic_failures).length > 0 && (
+                  <>
+                    <dt>checks failing</dt>
+                    <dd>
+                      <div className="dist">
+                        {Object.entries(report.deterministic_failures).map(([name, count]) => (
+                          <Tag key={name}>
+                            {name} {count}
+                          </Tag>
+                        ))}
+                      </div>
+                    </dd>
+                  </>
+                )}
+              </dl>
+              {events.length > 0 && (
+                <div className="feed">
+                  {events
+                    .slice(-40)
+                    .reverse()
+                    .map((event, index) => (
+                      <div key={index}>
+                        <span className="t">{event.ts?.slice(11, 19)} </span>
+                        {event.type}
+                        {event.short ? ` ${event.short} r${event.round}` : ''}
+                        {event.our_passed !== undefined && event.our_passed !== null && (
+                          <span className={event.our_passed ? 'ok' : 'no'}> {event.our_passed ? 'pass' : 'fail'}</span>
+                        )}
+                      </div>
+                    ))}
+                </div>
               )}
-            </dd>
-            <dt>activities</dt>
-            <dd>
-              {report.activity_coverage}/{report.attempts_collected}
-            </dd>
-            <dt>per round</dt>
-            <dd className="mono">
-              {Object.entries(report.per_round_pass).map(([round, passes]) => `r${round}: ${passes}`).join(' · ') || '—'}
-            </dd>
-          </dl>
-          {events.length > 0 && (
-            <div style={{ marginTop: 12 }}>
-              <h3>live feed</h3>
-              <div className="feed">
-                {events.slice(-40).reverse().map((event, index) => (
-                  <div key={index}>
-                    <span className="faint">{event.ts?.slice(11, 19)} </span>
-                    {event.type}
-                    {event.short ? ` ${event.short} r${event.round}` : ''}
-                    {event.passed !== undefined && (
-                      <span className={event.passed ? 'ok' : 'no'}> {event.passed ? 'pass' : 'fail'}</span>
-                    )}
-                    {event.our_passed !== undefined && event.our_passed !== null && (
-                      <span className={event.our_passed ? 'ok' : 'no'}> {event.our_passed ? 'pass' : 'fail'}</span>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
+            </>
+          ) : (
+            <span className="faint" style={{ fontSize: 12, textWrap: 'pretty' }}>
+              {report.trace_coverage === report.attempts_collected
+                ? `All ${report.attempts_collected} traces captured.`
+                : `${report.trace_coverage} of ${report.attempts_collected} traces captured.`}{' '}
+              Token spend, data coverage and the live judge feed live here — out of the way until you need them.
+            </span>
           )}
         </div>
       </div>
 
+      {taxonomy.length > 0 && (
+        <div className="section">
+          <div className="section-head">
+            <h2>Where it loses points</h2>
+            <span className="count">
+              {tagFilter ? (
+                <>
+                  filtering by <span className="mono">{tagFilter}</span> — click again to clear
+                </>
+              ) : (
+                'click a tag to filter the scenarios below'
+              )}
+            </span>
+          </div>
+          <div className="card">
+            <div className="taxo">
+              {taxonomy.slice(0, 12).map(([tag, count]) => (
+                <button
+                  className="taxo-row"
+                  key={tag}
+                  aria-pressed={tagFilter === tag}
+                  onClick={() => setTagFilter((current) => (current === tag ? null : tag))}
+                  title={`${count} of ${report.attempts_judged} judged attempts`}
+                >
+                  <span className="name">{tag}</span>
+                  <span className="n">
+                    {count} · {Math.round((100 * count) / (report.attempts_judged || 1))}%
+                  </span>
+                  <span className="track">
+                    <span className="fill" style={{ width: `${(100 * count) / (taxonomyTop || 1)}%` }} />
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="section">
         <div className="section-head">
-          <h2>Scenarios × rounds</h2>
+          <h2>Scenarios</h2>
           <span className="spacer" />
-          <span className="faint" style={{ fontSize: 12 }}>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {FILTERS.map((option) => (
+              <button key={option} className="toggle" aria-pressed={filter === option} onClick={() => setFilter(option)}>
+                {option}
+              </button>
+            ))}
+          </div>
+          <input
+            className="search"
+            placeholder="filter…"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+          <span className="count">
             {rows.length} of {data.matrix.length} shown
           </span>
         </div>
 
-        <div className="filters">
-          {(['all', 'failing', 'flaky', 'disagree', 'unjudged'] as Filter[]).map((option) => (
-            <button
-              key={option}
-              className="toggle"
-              aria-pressed={filter === option}
-              onClick={() => setFilter(option)}
-            >
-              {option}
-            </button>
-          ))}
-          <input
-            className="search"
-            placeholder="filter scenarios…"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-          />
+        <div className="table">
+          <div className="trow thead">
+            {sortHeader('scenario', 'Scenario')}
+            <span>Rounds</span>
+            {sortHeader('score', 'Score')}
+            <span className="agree">{sortHeader('official', 'Official / ours')}</span>
+            <span>Failure tags</span>
+          </div>
+          {rows.length === 0 && <Empty>nothing matches this filter</Empty>}
+          {rows.map((row) => {
+            const outcome = outcomes.get(row.scenario)
+            const firstRound = rounds[0] ?? 1
+            return (
+              <a
+                className="trow"
+                key={row.scenario}
+                href={`#/c/${encodeURIComponent(id)}/a/${encodeURIComponent(row.scenario)}/${firstRound}`}
+                title={row.scenario}
+              >
+                <span className="sid">{row.short}</span>
+                <span className="rounds">
+                  {rounds.map((round) => (
+                    <RoundPill key={round} round={round} cell={row.cells[String(round)]} />
+                  ))}
+                </span>
+                <Score value={outcome?.score ?? null} />
+                <Agreement outcome={outcome} />
+                <span className="tags">
+                  {(outcome?.taxonomy ?? []).slice(0, 3).map((tag) => (
+                    <Tag key={tag}>{tag}</Tag>
+                  ))}
+                </span>
+              </a>
+            )
+          })}
         </div>
 
-        <div className="matrix-wrap">
-          <table className="matrix">
-            <thead>
-              <tr>
-                <th>scenario</th>
-                {rounds.map((round) => (
-                  <th key={round}>r{round}</th>
-                ))}
-                <th>score</th>
-                <th>official</th>
-                <th>failure tags</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => {
-                const outcome = outcomes.get(row.scenario)
-                return (
-                  <tr key={row.scenario}>
-                    <td className="scenario" title={row.scenario}>
-                      {row.short}
-                    </td>
-                    {rounds.map((round) => {
-                      const cell = row.cells[String(round)]
-                      const mismatch = cell && cell.ours !== null && cell.official !== null && cell.ours !== cell.official
-                      return (
-                        <td key={round}>
-                          <a
-                            className={cellClass(cell)}
-                            href={`#/c/${encodeURIComponent(id)}/a/${encodeURIComponent(row.scenario)}/${round}`}
-                            title={
-                              cell
-                                ? `score ${cell.score ?? '—'} · official ${
-                                    cell.official === null ? '—' : cell.official ? 'pass' : 'fail'
-                                  }${cell.error ? ` · ${cell.error}` : ''}`
-                                : 'not collected'
-                            }
-                          >
-                            {cellLabel(cell)}
-                            {mismatch && <span className="flag">≠</span>}
-                          </a>
-                        </td>
-                      )
-                    })}
-                    <td className="nowrap">
-                      {outcome?.score !== null && outcome?.score !== undefined ? <Score value={outcome.score} /> : '—'}
-                    </td>
-                    <td className="mono nowrap faint">
-                      {outcome ? `${outcome.official_passes}/${outcome.rounds_total}` : '—'}
-                    </td>
-                    <td className="tags">{outcome?.taxonomy.slice(0, 3).join(', ')}</td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
         <div className="legend">
-          <span><span className="swatch" style={{ background: 'var(--pass)' }} />score ≥ 4</span>
-          <span><span className="swatch" style={{ background: 'var(--warn)' }} />score 3–4</span>
-          <span><span className="swatch" style={{ background: 'var(--fail)' }} />score &lt; 3</span>
-          <span><span className="swatch" style={{ background: 'var(--surface-3)' }} />not judged — <span className="mono">(pass)</span>/<span className="mono">(fail)</span> is the platform's</span>
+          <span>
+            <span className="swatch" style={{ background: 'var(--good)' }} />
+            score ≥ 4
+          </span>
+          <span>
+            <span className="swatch" style={{ background: 'var(--warn)' }} />
+            3–4
+          </span>
+          <span>
+            <span className="swatch" style={{ background: 'var(--bad)' }} />
+            below 3
+          </span>
+          <span>
+            <span className="swatch" style={{ background: 'var(--fg-5)' }} />
+            not judged
+          </span>
           <span>≠ we disagree with the platform judge</span>
         </div>
       </div>
 
       {diff.data && diff.data.disagreements.length > 0 && (
         <div className="section">
-          <h2>Where we disagree with the platform judge</h2>
-          <p className="subtle">
-            {num(diff.data.counts.ours_pass_official_fail ?? 0)} we pass / it fails ·{' '}
-            {num(diff.data.counts.ours_fail_official_pass ?? 0)} we fail / it passes — same attempts, two rubrics.
+          <div className="section-head">
+            <h2>Where we disagree with the platform judge</h2>
+          </div>
+          <p className="lede">
+            {num(diff.data.counts.ours_pass_official_fail ?? 0)} we pass and it fails ·{' '}
+            {num(diff.data.counts.ours_fail_official_pass ?? 0)} we fail and it passes — the same attempts, two rubrics.
           </p>
           {diff.data.disagreements.slice(0, 24).map((row) => (
-            <div key={`${row.scenario}-${row.round}`} className="card" style={{ marginTop: 10 }}>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+            <div className="card tight" key={`${row.scenario}-${row.round}`}>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                 <a className="mono" href={`#/c/${encodeURIComponent(id)}/a/${encodeURIComponent(row.scenario)}/${row.round}`}>
                   {row.short} r{row.round}
                 </a>
-                <Chip tone={row.agreement === 'ours_pass_official_fail' ? 'pass' : 'fail'}>
-                  {row.agreement === 'ours_pass_official_fail' ? 'ours pass · official fail' : 'ours fail · official pass'}
-                </Chip>
+                <Pill tone={row.agreement === 'ours_pass_official_fail' ? 'good' : 'bad'}>
+                  {row.agreement === 'ours_pass_official_fail' ? 'ours pass · platform fail' : 'ours fail · platform pass'}
+                </Pill>
                 {row.taxonomy.slice(0, 3).map((tag) => (
-                  <Chip key={tag} mono>{tag}</Chip>
+                  <Tag key={tag}>{tag}</Tag>
                 ))}
               </div>
               <dl className="kv">
                 <dt>ours</dt>
                 <dd>{row.ours || '—'}</dd>
-                <dt>official</dt>
-                <dd className="subtle">{row.official || '—'}</dd>
+                <dt>platform</dt>
+                <dd>{row.official || '—'}</dd>
               </dl>
             </div>
           ))}

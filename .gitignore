@@ -18,3 +18,4 @@ evalkit.local.toml
 
 # OS
 .DS_Store
+dashboard/tsconfig.tsbuildinfo
