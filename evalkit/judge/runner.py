@@ -79,12 +79,12 @@ async def judge_attempt(
         )
 
         async def one_vote(index: int) -> VoteRecord:
-            from ..schemas import VoteVerdict  # local import keeps the schema in one place
+            from ..schemas import VoteVerdictV4  # local import keeps the schema in one place
 
             if llm_semaphore is not None:
                 async with llm_semaphore:
-                    return await _run_vote(llm, system_prompt, user_prompt, VoteVerdict, index)
-            return await _run_vote(llm, system_prompt, user_prompt, VoteVerdict, index)
+                    return await _run_vote(llm, system_prompt, user_prompt, VoteVerdictV4, index)
+            return await _run_vote(llm, system_prompt, user_prompt, VoteVerdictV4, index)
 
         records = await asyncio.gather(*(one_vote(index) for index in range(votes)))
         turn_verdicts.append(

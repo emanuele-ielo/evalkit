@@ -12,8 +12,7 @@ Two decisions worth stating, because they are what make the number stable:
   binary judge, so agreement stays measurable.
 
 Mechanical failures **cap** the score instead of vetoing it: a leaked internal
-field, a missing tool call, a missing confirm-with-TIM disclaimer on LOB-flagged
-rows (`lob_disclaimer`) or a contact detail handed out while a row is pending
+field, a missing tool call, or a contact detail handed out while a row is pending
 channel validation (`pcv_no_contact`) means the answer cannot be better than a 2,
 whatever the LLM thought of the prose. Any blocking `DeterministicCheck` flows
 through `blocking_failures()` by name-agnostic contract, so new checks join the
@@ -39,13 +38,13 @@ from ..schemas import (
     VoteRecord,
 )
 
-CRITERIA: tuple[str, ...] = ("grounding", "completeness", "clauses", "provenance")
+CRITERIA: tuple[str, ...] = ("grounding", "completeness", "clauses", "customer_care")
 
 _VOTE_FIELDS = {
     "grounding": "grounding_score",
     "completeness": "completeness_score",
     "clauses": "clauses_score",
-    "provenance": "provenance_score",
+    "customer_care": "customer_care_score",
 }
 
 # What a blocking mechanical failure caps the turn's score at.

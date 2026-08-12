@@ -137,7 +137,7 @@ def load_config(path: str | Path | None = None, *, data_dir: str | Path | None =
     return Config(
         data_dir=resolved_data,
         llm=llm,
-        required_criteria=list((raw.get("rubric") or {}).get("required", ["grounding", "completeness", "clauses", "provenance"])),
+        required_criteria=list((raw.get("rubric") or {}).get("required", ["grounding", "completeness", "clauses", "customer_care"])),
         pass_threshold=float((raw.get("rubric") or {}).get("pass_threshold", 4.0)),
         min_criterion_score=int((raw.get("rubric") or {}).get("min_criterion_score", 3)),
         agents=agents,

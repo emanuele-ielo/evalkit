@@ -5,7 +5,7 @@ Three properties the platform judge lacked, and the reason this file exists:
 1. **The tool payloads are in the prompt.** The official judge graded grounding
    without ever seeing what the tools returned, which is why its number was
    pessimistic (9/43 blind vs 18/43 once the payload was shown).
-2. **Criteria are separate.** Grounding, completeness, clauses and provenance are
+2. **Criteria are separate.** Grounding, task resolution, conditions and customer care are
    judged and reported independently, so a majority is taken per criterion
    instead of on one all-or-nothing verdict — the stable way to vote when runs
    vary (σ ≈ 2.3 scenarios per round on this suite).
@@ -20,18 +20,16 @@ were produced with, and reports refuse to mix versions silently.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from ..schemas import AttemptView, DeterministicCheck, ToolCallView, TurnView
 
-# v3 (2026-08-12): completeness moved to a proportional scale with an explicit
-# "directly asked fact" gate and meta-sentence exclusion; clauses narrowed to
-# prose caveats with a mandatory payload locator and an anti-double-counting
-# rule (topic omissions belong to completeness); the machine-checkable corpus
-# flags (needs_lob_validation, pending_channel_validation) moved to blocking
-# deterministic checks; provenance_literals retired. v2 verdicts on disk stay
-# readable — the schema is unchanged, only prompt semantics and this tag moved.
-RUBRIC_VERSION = "v3"
+# v4 (2026-08-12): customer-care answers no longer cite corpus provenance and
+# LOB validation is no longer model-facing or graded. Underspecified requests
+# are judged conversationally: one focused clarification can be the complete
+# answer for that turn. Historical v1-v3 verdicts remain readable on disk.
+RUBRIC_VERSION = "v4"
 
 # Per-call payload budget in the prompt. Payloads here run to ~31 KB; the cap is
 # generous on purpose and truncation is always announced to the judge.
@@ -58,16 +56,29 @@ asked**, not about how many defects you counted:
 - **2** — the defect makes the answer useless or misleading on this criterion. An answer
   that invents nothing but also tells the user nothing they asked for lands here: being
   harmless is not the same as being useful.
-- **1** — severe: contradicts the payload, fabricates a source or fact, or does not
+- **1** — severe: contradicts the payload, fabricates a fact, or does not
   answer at all.
 
 Use the whole range. Reserve 5 for genuinely clean work and 1 for real damage; a middling
 answer is a 3, not a 2 out of caution.
 
+## Underspecified requests
+Before scoring, decide whether the user supplied the subject needed to choose among
+materially different answers. For a message such as "A chi posso scrivere?", "Quanto
+costa?" or "Come faccio?" with no usable subject in the conversation, one concise,
+focused clarification question is the correct and complete customer-care answer for
+that turn. Do not require a tool call, do not force reference facts that assume an
+unstated intent, and do not tag the clarification as evasive or incomplete. A short
+message that does name its subject (for example "costo cambio SIM") is not ambiguous.
+
+Legacy reference text may still mention source versions, citations, provenance or a
+generic "confirm with TIM" LOB disclaimer. Those requirements are obsolete in v4:
+exclude them from completeness and clauses, and never reward or penalise them.
+
 ## Criteria (score each independently)
 
 1. GROUNDING — decompose the agent's answer into atomic factual claims: procedures,
-   channels, names of portals/apps, prices, thresholds, eligibility, dates, versions.
+   channels, names of portals/apps, prices, thresholds, eligibility and dates.
    For each claim set:
    - SUPPORTED: the payload states it. Quote it verbatim in `evidence_quote` and point
      to it in `evidence_locator` (e.g. `search_vera#0.results[3].answer`).
@@ -80,10 +91,14 @@ answer is a 3, not a 2 out of caution.
    PARTIAL claims; 3 when one peripheral claim is UNSUPPORTED; 2 when an UNSUPPORTED claim
    is central to the answer; 1 when any claim is CONTRADICTED.
 
-2. COMPLETENESS — take the REFERENCE FACTS (and, when present, the REFERENCE ANSWER) as
-   the list of things this answer owed the user.
-   First separate out meta sentences: pure behaviour phrases carry no fact — disclaimers
-   ("da confermare con TIM"), inability statements ("non posso verificare"), greetings,
+2. TASK RESOLUTION / COMPLETENESS — use the typed TURN CONTRACT when present; otherwise
+   take the REFERENCE FACTS (and, when present, the REFERENCE ANSWER) as the list of things
+   this answer owed the user. A `response_mode: clarify` contract means the focused question
+   named in `required_obligations` is the asked fact; branch answers and `optional_facts` are
+   not owed yet. A `response_mode: answer` contract makes `required_obligations` the gold and
+   explicitly excludes `optional_facts` from scoring.
+   First separate out meta sentences: pure behaviour phrases carry no fact — legacy LOB
+   disclaimers, source/citation phrases, inability statements ("non posso verificare"), greetings,
    offers to help, connectives. List each such reference item in `facts` with a `note`
    that STARTS with `meta:true` and exclude it from every count below; do not let a
    present disclaimer raise the score or an absent one lower it here.
@@ -103,7 +118,8 @@ answer is a 3, not a 2 out of caution.
      answers — or coverage < 0.5.
    - 1 = nothing the user asked for was conveyed.
 
-3. CLAUSES — prose caveats only. A clause is a condition, caveat or prerequisite that the
+3. CONDITIONS / CLAUSES — use `required_conditions` from the typed TURN CONTRACT when
+   present; otherwise inspect prose caveats. A clause is a condition, caveat or prerequisite that the
    payload attaches IN PROSE to something the answer actually talked about: validity
    conditions, "only if", required confirmations, costs that apply, who may request it.
    Two hard rules decide whether a clause row is valid at all:
@@ -113,8 +129,8 @@ answer is a 3, not a 2 out of caution.
    - NEVER list a clause about a topic the answer never treated. Omitting a whole topic is
      a completeness defect and is already priced there; punishing the same omission again
      under clauses is double counting, and it is forbidden.
-   Machine row-flags (needs_lob_validation, pending_channel_validation) are enforced in
-   code and reported under DETERMINISTIC FINDINGS — do not re-grade them here.
+   `pending_channel_validation` is enforced in code and reported under DETERMINISTIC
+   FINDINGS — do not re-grade it here. Ignore `needs_lob_validation` entirely.
    Status per clause: PRESENT, PARTIAL, ABSENT, or NOT_REQUIRED when the payload attaches
    no such condition to what was asked. `clauses_score` is anchored to the counts:
    - 5 = no clause was required, or every required clause is PRESENT.
@@ -125,14 +141,19 @@ answer is a 3, not a 2 out of caution.
    - 1 = the answer actively contradicts a condition in the payload.
    With zero ABSENT and zero PARTIAL rows the score is 5 — never lower.
 
-4. PROVENANCE — list in `cited_sources` every source, version or validity marker the
-   answer cites (e.g. "V. 16.02.2026", a portal name given as the source). List in
-   `invented_sources` any that the payload does not contain — including plausible-looking
-   dates or document names the agent produced on its own. `provenance.correct` is true
-   when nothing is invented and any cited version matches the payload's. `provenance_score`:
-   5 when provenance is correct or nothing needed citing; 4 when a citation is imprecise
-   but real; 3 when a version marker is stale or mismatched; 2 when a source is invented;
-   1 when invented provenance is used to lend authority to an unsupported claim.
+4. CUSTOMER CARE — judge the user-facing delivery independently from factual coverage.
+   The answer must sound like a concise, natural TIM customer-care reply in Italian and
+   lead with the useful next step. It must never mention sources, versions, documents,
+   pages, knowledge bases, corpus rows, retrieval, tools or internal systems. A focused
+   clarification question is excellent customer care when the turn contract says clarify.
+   `customer_care_score`:
+   - 5 = natural, focused and operational; no internal/source framing.
+   - 4 = useful but slightly verbose, stiff or repetitive.
+   - 3 = noticeably chatbot-like or unfocused, while still usable.
+   - 2 = speaks like a research/KB bot, mentions sources or versions, or buries the next step.
+   - 1 = wrong language, unprofessional, or dominated by internal/debug content.
+   Add `mentions_internal_sources` whenever source/version/document/KB framing appears;
+   add `poor_customer_care` when this score is 3 or lower.
 
 ## Verdict
 There is no pass/fail field — the four scores are the verdict. When evidence is
@@ -152,8 +173,63 @@ is 5. `taxonomy` lists every failure tag that applies, or ["none"] when nothing 
 """
 
 
+_INTERNAL_PAYLOAD_KEYS = {
+    "source",
+    "source_version",
+    "source_doc",
+    "source_page",
+    "source_page_or_sheet",
+    "source_sheet",
+    "needs_lob_validation",
+    "logs",
+}
+_OBSOLETE_NOTE = re.compile(r"needs_lob_validation|cita(?:re)?\b|source\.version|dato da confermare con TIM", re.IGNORECASE)
+_LEGACY_REFERENCE_TAIL = re.compile(r"\s*Provenance expectation\b.*", re.IGNORECASE | re.DOTALL)
+_LEGACY_SOURCE_SENTENCE = re.compile(
+    r"\s*(?:Dato valido secondo.*?fonti TIM|(?:È|E|Sono|Dato|Dati)[^.]*?da confermare con TIM)\.?",
+    re.IGNORECASE,
+)
+
+
+def _customer_payload(node: Any) -> Any:
+    """Remove legacy ingestion/provenance metadata before the v4 judge sees it."""
+    if isinstance(node, dict):
+        cleaned: dict[str, Any] = {}
+        for key, value in node.items():
+            if key in _INTERNAL_PAYLOAD_KEYS:
+                continue
+            if key in {"notes", "agent_notes"} and isinstance(value, list):
+                cleaned[key] = [note for note in value if not (isinstance(note, str) and _OBSOLETE_NOTE.search(note))]
+            else:
+                cleaned[key] = _customer_payload(value)
+        return cleaned
+    if isinstance(node, list):
+        return [_customer_payload(value) for value in node]
+    return node
+
+
+def _customer_reference(text: str) -> str:
+    """Project historical encyclopedic gold into the customer-facing v4 contract."""
+    text = _LEGACY_REFERENCE_TAIL.sub("", text)
+    return _LEGACY_SOURCE_SENTENCE.sub("", text).strip()
+
+
+def _customer_author_notes(text: str) -> str:
+    if "Provenance is graded" in text or "needs_lob_validation" in text:
+        return ""
+    return text
+
+
 def _format_payload(call: ToolCallView) -> str:
     payload = call.output if call.output is not None else call.output_raw
+    if isinstance(payload, str):
+        try:
+            decoded = json.loads(payload)
+        except (TypeError, ValueError):
+            decoded = payload
+        payload = _customer_payload(decoded)
+    else:
+        payload = _customer_payload(payload)
     try:
         text = json.dumps(payload, ensure_ascii=False, indent=1)
     except (TypeError, ValueError):
@@ -221,15 +297,26 @@ def build_vote_prompt(
 
     parts.append(f"## AGENT ANSWER (graded)\n{turn.agent_text or '(empty answer)'}")
 
+    contract = turn.expected.metadata.get("evalkit_v4")
+    if isinstance(contract, dict):
+        parts.append("## TURN CONTRACT (authoritative v4 obligations)\n" + json.dumps(contract, ensure_ascii=False, indent=1))
     if turn.expected.reference_response:
-        parts.append(f"## REFERENCE ANSWER (a good answer, not the only one)\n{turn.expected.reference_response}")
-    if turn.expected.expected_output:
-        parts.append(f"## REFERENCE FACTS (what the answer owed the user)\n{turn.expected.expected_output}")
-    if include_author_notes and turn.expected.turn_prompt:
         parts.append(
-            "## SCENARIO AUTHOR NOTES (domain context — the criteria in your instructions take precedence)\n"
-            + turn.expected.turn_prompt
+            "## REFERENCE ANSWER (a good answer, not the only one)\n"
+            + _customer_reference(turn.expected.reference_response)
         )
+    if turn.expected.expected_output:
+        parts.append(
+            "## REFERENCE FACTS (what the answer owed the user)\n"
+            + _customer_reference(turn.expected.expected_output)
+        )
+    if include_author_notes and turn.expected.turn_prompt:
+        author_notes = _customer_author_notes(turn.expected.turn_prompt)
+        if author_notes:
+            parts.append(
+                "## SCENARIO AUTHOR NOTES (domain context — the criteria in your instructions take precedence)\n"
+                + author_notes
+            )
 
     parts.append(f"## DETERMINISTIC FINDINGS (already decided in code)\n{_format_deterministic(checks)}")
     parts.append("Return only the structured judgement.")

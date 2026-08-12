@@ -1,7 +1,32 @@
-import type { ReactNode } from 'react'
+import { useId, type ReactNode } from 'react'
 import type { TokenUsage } from '../types'
 
 export type Tone = 'default' | 'good' | 'warn' | 'bad' | 'info' | 'accent' | 'solid'
+
+export function MetricHint({
+  label,
+  children,
+  align = 'center',
+  className,
+}: {
+  label: ReactNode
+  children: ReactNode
+  align?: 'left' | 'center' | 'right'
+  className?: string
+}) {
+  const id = useId()
+  const classes = ['metric-hint', align]
+  if (className) classes.push(className)
+
+  return (
+    <span className={classes.join(' ')} tabIndex={0} aria-describedby={id}>
+      {label}
+      <span className="metric-tooltip" id={id} role="tooltip">
+        {children}
+      </span>
+    </span>
+  )
+}
 
 /** The one place the 1–5 scale turns into a colour. */
 export function scoreTone(value: number | null | undefined): 'good' | 'warn' | 'bad' | 'none' {
@@ -56,9 +81,10 @@ export function Eyebrow({ children }: { children: ReactNode }) {
 }
 
 export function Verdict({ passed, label }: { passed: boolean | null | undefined; label?: string }) {
-  if (passed === null || passed === undefined) return <Pill>{label ? `${label} —` : '—'}</Pill>
+  const help = `${label ? `${label} ` : ''}pass/fail decision for this attempt.`
+  if (passed === null || passed === undefined) return <Pill title={help}>{label ? `${label} —` : '—'}</Pill>
   return (
-    <Pill tone={passed ? 'good' : 'bad'}>
+    <Pill tone={passed ? 'good' : 'bad'} title={help}>
       {label ? `${label} ` : ''}
       {passed ? 'pass' : 'fail'}
     </Pill>
@@ -66,9 +92,10 @@ export function Verdict({ passed, label }: { passed: boolean | null | undefined;
 }
 
 export function Score({ value, digits = 2 }: { value: number | null | undefined; digits?: number }) {
-  if (value === null || value === undefined) return <span className="score none">—</span>
+  const help = 'Evalkit score from 1 (poor) to 5 (excellent). A score of 4 or more usually passes.'
+  if (value === null || value === undefined) return <span className="score none" title={help}>—</span>
   return (
-    <span className={`score ${scoreTone(value)}`}>
+    <span className={`score ${scoreTone(value)}`} title={help}>
       {value.toFixed(digits)}
       <small>/5</small>
     </span>
@@ -101,8 +128,8 @@ export function Stat({
   hint?: string
 }) {
   return (
-    <div className="stat" title={hint}>
-      <span className="k">{k}</span>
+    <div className="stat">
+      <span className="k">{hint ? <MetricHint label={k} align="left">{hint}</MetricHint> : k}</span>
       <HeroNum value={value} of={of} />
       {foot !== undefined && <span className={`foot${tone ? ` ${tone}` : ''}`}>{foot}</span>}
     </div>

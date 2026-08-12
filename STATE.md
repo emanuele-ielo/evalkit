@@ -4,6 +4,30 @@ Kit di eval **nostro** per gli agenti Wonderful. `wful` è il motore (runna scen
 legge tracce, fetcha result e activity); tutto il resto è nostro: raccolta,
 rubrica a voti 1-5, metriche, dashboard locale.
 
+## Aggiornamento 2026-08-12 — Terra + customer care v4
+
+Questa sezione sostituisce le decisioni v3/Luna sotto per il lavoro futuro; il resto del file resta come
+storia degli esperimenti già eseguiti.
+
+- L'agente passa a **`gpt-5.6-terra`** sul branch `vera-model-terra`. Luna e le campagne v2/v3 restano
+  baseline storiche: non confrontare numericamente i loro punteggi con v4.
+- **LOB e provenienza non sono più customer-facing:** `source*` e `needs_lob_validation` non arrivano più
+  dai tool; prompt e rubrica vietano fonti, versioni, documenti, KB e formule generiche di conferma TIM.
+- La rubrica **v4** misura grounding, risoluzione/completezza, condizioni decisionali e tono customer care.
+  I payload e i gold storici vengono proiettati senza LOB/provenienza; i verdict v2/v3 restano leggibili.
+- Le richieste senza uno slot che cambia materialmente la risposta devono produrre **una domanda breve,
+  senza tool**. La ricerca parte al turno successivo usando intento + oggetto + vincoli espliciti.
+- Nuovo batch iniziale `v4_customer_care`: `g057` (canale scritto → chiarire lo scopo → reclamo) e `g032`
+  (privatizzazione → chiarire tipo linea/stato → percorso). Nel secondo scenario il massimo di **4 SIM
+  prepagate Consumer per codice fiscale** resta una condizione obbligatoria.
+- Il lessicale di `search_vera` ora verifica i confini di parola, non considera confident una keyword
+  ordinaria isolata e non lascia che il rumore lessicale blocchi il retry semantico; FAQ, KB e probe dei
+  due corpus girano in parallelo.
+
+I 43 scenari `gold_v2_*` e i 27 draft v3 non vanno riscritti in-place: hanno significato storico. La
+migrazione completa richiede nuovi slug v4 con obblighi tipizzati (`metadata.evalkit_v4`) e traiettorie
+multi-turn per le famiglie ambigue.
+
 Oggi due filoni **paralleli** (sessioni diverse), entrambi chiusi:
 1. **Revamp UX/UI della dashboard** sul design system Wonderful (§6, intatto da quella sessione).
 2. **Overhaul dell'eval**: diagnosi completa di `luna-43x3` (5 agenti di analisi), fix di

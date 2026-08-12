@@ -187,6 +187,7 @@ class ExpectedTurnView(BaseModel):
     user_message: str | None = None
     reference_response: str | None = None
     expected_output: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
     tools_allowed: list[str] = Field(default_factory=list)
     assertions: list[dict[str, Any]] = Field(default_factory=list)
     judge_model: str | None = None
@@ -274,8 +275,6 @@ class AttemptView(BaseModel):
 TaxonomyTag = Literal[
     "unsupported_claim",
     "contradicts_payload",
-    "invented_provenance",
-    "wrong_version_cited",
     "missing_required_fact",
     "partial_answer",
     "missing_clause",
@@ -285,6 +284,9 @@ TaxonomyTag = Literal[
     "no_tool_call",
     "ignored_tool_payload",
     "hedging_without_answer",
+    "poor_customer_care",
+    "mentions_internal_sources",
+    "premature_tool_call",
     "none",
 ]
 
@@ -321,6 +323,8 @@ class ClauseCheck(BaseModel):
 
 
 class ProvenanceCheck(BaseModel):
+    """Legacy v2/v3 evidence retained only when old verdicts are read."""
+
     cited_sources: list[str]
     invented_sources: list[str]
     correct: bool
@@ -330,9 +334,8 @@ class ProvenanceCheck(BaseModel):
 Score = Literal[1, 2, 3, 4, 5]
 
 
-class VoteVerdict(BaseModel):
-    """One judge vote. Also the LLM's strict response schema — every field is
-    required; use "" / [] rather than null.
+class VoteVerdictCore(BaseModel):
+    """Fields shared by current and historical judge votes.
 
     Each criterion is scored 1–5 rather than pass/fail: "said nothing false but
     answered nothing" and "contradicted the payload" are both failures on a
@@ -346,11 +349,29 @@ class VoteVerdict(BaseModel):
     completeness_score: Score
     clauses: list[ClauseCheck]
     clauses_score: Score
-    provenance: ProvenanceCheck
-    provenance_score: Score
-    taxonomy: list[TaxonomyTag]
     explanation: str
     suggestion: str
+
+    model_config = {"extra": "forbid"}
+
+
+class VoteVerdictV4(VoteVerdictCore):
+    """Strict response schema sent to the v4 judge."""
+
+    customer_care_score: Score
+    taxonomy: list[TaxonomyTag]
+
+
+class LegacyVoteVerdictV3(VoteVerdictCore):
+    """Old vote shape, read-only compatibility for v2/v3 verdict files."""
+
+    provenance: ProvenanceCheck
+    provenance_score: Score
+    taxonomy: list[str]
+
+
+# Public name remains the current judge schema for callers that imported it.
+VoteVerdict = VoteVerdictV4
 
 
 class DeterministicCheck(BaseModel):
@@ -384,7 +405,7 @@ class VoteRecord(BaseModel):
     """A vote plus its cost and any error that killed it."""
 
     index: int
-    verdict: VoteVerdict | None = None
+    verdict: LegacyVoteVerdictV3 | VoteVerdictV4 | None = None
     usage: TokenUsage | None = None
     error: str | None = None
     duration_ms: float | None = None

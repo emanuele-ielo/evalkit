@@ -1,7 +1,22 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { api, useAsync } from '../api'
-import { Empty, ErrorBox, Pill, Score, Tag, Verdict, diffLines, highlight, kb, ms, num, scoreTone, tokenLine } from '../components/bits'
+import {
+  Empty,
+  ErrorBox,
+  MetricHint,
+  Pill,
+  Score,
+  Tag,
+  Verdict,
+  diffLines,
+  highlight,
+  kb,
+  ms,
+  num,
+  scoreTone,
+  tokenLine,
+} from '../components/bits'
 import { JsonValue, countRows } from '../components/json'
 import { Markdown } from '../components/md'
 import { deriveLede, worstTurn } from '../lib/lede'
@@ -72,7 +87,7 @@ function ToolCard({ call, focus }: { call: ToolCallView; focus: Focus | null }) 
             {call.matches_mock === false ? 'mock drift' : 'mocked'}
           </Pill>
         )}
-        <span className="m">
+        <span className="m" title="Rows returned · payload size · time spent by this tool call">
           {[rows !== null ? `${rows} rows` : null, kb(call.output_bytes), call.duration_ms ? ms(call.duration_ms) : null]
             .filter(Boolean)
             .join(' · ')}
@@ -303,16 +318,35 @@ function VerdictPanel({ detail, focus, onFocus }: { detail: AttemptDetail; focus
       </div>
 
       <div className="verdict-top">
-        <span className="big-num">
-          {verdict.score.toFixed(2)}
-          <small> / 5</small>
-        </span>
+        <MetricHint
+          label={
+            <span className="big-num">
+              {verdict.score.toFixed(2)}
+              <small> / 5</small>
+            </span>
+          }
+          align="left"
+          className="metric-value"
+        >
+          Overall Evalkit score for this attempt, from 1 (poor) to 5 (excellent).
+        </MetricHint>
         {verdict.coverage && (
-          <Pill tone={verdict.coverage === 'FULL' ? 'good' : verdict.coverage === 'MISS' ? 'bad' : 'warn'}>
-            {verdict.coverage}
-          </Pill>
+          <MetricHint
+            label={
+              <Pill tone={verdict.coverage === 'FULL' ? 'good' : verdict.coverage === 'MISS' ? 'bad' : 'warn'}>
+                {verdict.coverage}
+              </Pill>
+            }
+          >
+            How completely the answer covered the reference facts required for a correct response.
+          </MetricHint>
         )}
-        <Pill tone={verdict.passed ? 'good' : 'bad'}>threshold {verdict.passed ? 'pass' : 'fail'}</Pill>
+        <MetricHint
+          label={<Pill tone={verdict.passed ? 'good' : 'bad'}>threshold {verdict.passed ? 'pass' : 'fail'}</Pill>}
+          align="right"
+        >
+          Whether the score and all required criteria met the rubric’s minimum passing values.
+        </MetricHint>
       </div>
 
       {turn?.score_capped_by && (
@@ -325,16 +359,38 @@ function VerdictPanel({ detail, focus, onFocus }: { detail: AttemptDetail; focus
       {verdict.turns.map((each) => (
         <div className="group" key={each.turn_index}>
           <h3>
-            Criteria — median of {each.votes.length} vote{each.votes.length === 1 ? '' : 's'}
-            {verdict.turns.length > 1 && ` · turn ${each.turn_index + 1}`}
+            <MetricHint
+              label={
+                <>
+                  Criteria — median of {each.votes.length} vote{each.votes.length === 1 ? '' : 's'}
+                  {verdict.turns.length > 1 && ` · turn ${each.turn_index + 1}`}
+                </>
+              }
+              align="left"
+            >
+              Each criterion is scored independently by several judge votes; the middle score is used to reduce outliers.
+            </MetricHint>
           </h3>
           {each.criteria.map((criterion) => (
             <div className="crit-row" key={criterion.name}>
               <span className="cname">
-                {criterion.name}
-                {!criterion.required && <span className="faint"> (advisory)</span>}
+                <MetricHint
+                  label={
+                    <>
+                      {criterion.name}
+                      {!criterion.required && <span className="faint"> (advisory)</span>}
+                    </>
+                  }
+                  align="left"
+                >
+                  {criterion.required
+                    ? 'A required rubric dimension: a low score here can make the whole attempt fail.'
+                    : 'An advisory rubric dimension: it informs the score but does not block a pass by itself.'}
+                </MetricHint>
               </span>
-              <span className="votes">{criterion.scores.join(' · ') || '—'}</span>
+              <span className="votes" title="Scores from the individual judge votes before the median is selected">
+                {criterion.scores.join(' · ') || '—'}
+              </span>
               <Score value={criterion.score} />
             </div>
           ))}
@@ -373,19 +429,22 @@ function VerdictPanel({ detail, focus, onFocus }: { detail: AttemptDetail; focus
               className="vote-pill"
               aria-pressed={voteIndex === record.index}
               onClick={() => setVoteIndex(record.index)}
-              title={record.error ?? undefined}
+              title={record.error ?? 'Score from one independent judge vote. Select it to inspect the supporting evidence.'}
             >
               vote {record.index + 1}
               {record.error
                 ? ' ✕'
                 : record.verdict
-                  ? ` · ${(
-                      (record.verdict.grounding_score +
-                        record.verdict.completeness_score +
-                        record.verdict.clauses_score +
-                        record.verdict.provenance_score) /
-                      4
-                    ).toFixed(1)}`
+                  ? ` · ${[
+                      record.verdict.grounding_score,
+                      record.verdict.completeness_score,
+                      record.verdict.clauses_score,
+                      record.verdict.customer_care_score,
+                      record.verdict.provenance_score,
+                    ]
+                      .filter((score): score is number => typeof score === 'number')
+                      .reduce((sum, score, _, scores) => sum + score / scores.length, 0)
+                      .toFixed(1)}`
                   : ''}
             </button>
           ))}
@@ -440,15 +499,19 @@ function VerdictPanel({ detail, focus, onFocus }: { detail: AttemptDetail; focus
               />
             ))}
 
-            <h3 style={{ marginTop: 12 }}>Provenance</h3>
-            <dl className="kv">
-              <dt>cited</dt>
-              <dd>{vote.provenance.cited_sources.join(' · ') || '—'}</dd>
-              <dt>invented</dt>
-              <dd style={{ color: vote.provenance.invented_sources.length ? 'var(--bad)' : undefined }}>
-                {vote.provenance.invented_sources.join(' · ') || 'none'}
-              </dd>
-            </dl>
+            {vote.provenance && (
+              <>
+                <h3 style={{ marginTop: 12 }}>Provenance (legacy rubric)</h3>
+                <dl className="kv">
+                  <dt>cited</dt>
+                  <dd>{vote.provenance.cited_sources.join(' · ') || '—'}</dd>
+                  <dt>invented</dt>
+                  <dd style={{ color: vote.provenance.invented_sources.length ? 'var(--bad)' : undefined }}>
+                    {vote.provenance.invented_sources.join(' · ') || 'none'}
+                  </dd>
+                </dl>
+              </>
+            )}
             {vote.suggestion && (
               <div className="callout warn">
                 <strong>Suggestion</strong>
@@ -509,7 +572,11 @@ function PromptPanel({ detail }: { detail: AttemptDetail }) {
             <dd className="mono">{view.system_prompt_hash}</dd>
             <dt>source</dt>
             <dd className="mono">{view.system_prompt_source}</dd>
-            <dt>chars</dt>
+            <dt>
+              <MetricHint label="chars" align="left">
+                Number of characters in the system prompt sent to the agent.
+              </MetricHint>
+            </dt>
             <dd className="num">{num(view.system_prompt.length)}</dd>
             <dt>skill</dt>
             <dd>
@@ -582,9 +649,21 @@ function LlmPanel({ detail }: { detail: AttemptDetail }) {
           <div className="r head">
             <span>Source</span>
             <span>Model</span>
-            <span>In</span>
-            <span>Cached</span>
-            <span>Out</span>
+            <span>
+              <MetricHint label="In" align="right">
+                Input tokens sent to the model for this call.
+              </MetricHint>
+            </span>
+            <span>
+              <MetricHint label="Cached" align="right">
+                Input tokens reused from a provider cache, which are usually cheaper and faster.
+              </MetricHint>
+            </span>
+            <span>
+              <MetricHint label="Out" align="right">
+                Tokens generated by the model in its response.
+              </MetricHint>
+            </span>
           </div>
           {view.llm_calls.map((call, index) => (
             <div className="r" key={index}>
@@ -610,13 +689,25 @@ function LlmPanel({ detail }: { detail: AttemptDetail }) {
       </div>
 
       <dl className="kv" style={{ paddingTop: 6, borderTop: '1px solid var(--line-1)' }}>
-        <dt>agent tokens</dt>
+        <dt>
+          <MetricHint label="agent tokens" align="left">
+            Input, cached input and output tokens consumed by the tested agent in this attempt.
+          </MetricHint>
+        </dt>
         <dd className="num">{tokenLine(view.agent_tokens)}</dd>
-        <dt>our judge</dt>
+        <dt>
+          <MetricHint label="our judge" align="left">
+            Tokens consumed by Evalkit’s judge while reviewing this attempt.
+          </MetricHint>
+        </dt>
         <dd className="num">{verdict ? tokenLine(verdict.tokens) : '—'}</dd>
         <dt>agent version</dt>
         <dd>{view.agent_version || '—'}</dd>
-        <dt>wall clock</dt>
+        <dt>
+          <MetricHint label="wall clock" align="left">
+            Total elapsed time from the start to the end of this attempt.
+          </MetricHint>
+        </dt>
         <dd className="num">
           {ms(view.execution_time_ms)}
           {view.trace_spans !== null && ` · ${view.trace_spans} trace spans`}
@@ -746,7 +837,9 @@ export default function Attempt({ id, scenario, round }: { id: string; scenario:
               <span className="r">r{sibling.round}</span>
               {mismatch && <span className="mismatch">≠</span>}
               {sibling.score !== null && sibling.score !== undefined && (
-                <span className="s">{sibling.score.toFixed(1)}</span>
+                <span className="s" title="Evalkit score for this attempt, from 1 to 5">
+                  {sibling.score.toFixed(1)}
+                </span>
               )}
             </a>
           )

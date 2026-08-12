@@ -60,8 +60,8 @@ def build_report(store: CampaignStore, manifest: CampaignManifest) -> CampaignRe
     by_scenario: dict[str, list[tuple[int, AttemptVerdict | None, bool | None]]] = {}
     criteria_judged: Counter[str] = Counter()
     criteria_passed: Counter[str] = Counter()
-    criteria_scores: dict[str, list[float]] = {name: [] for name in ("grounding", "completeness", "clauses", "provenance")}
-    criteria_dist: dict[str, Counter[str]] = {name: Counter() for name in criteria_scores}
+    criteria_scores: dict[str, list[float]] = {}
+    criteria_dist: dict[str, Counter[str]] = {}
     attempt_scores: list[float] = []
     score_dist: Counter[str] = Counter()
     deterministic_failures: Counter[str] = Counter()
@@ -119,7 +119,9 @@ def build_report(store: CampaignStore, manifest: CampaignManifest) -> CampaignRe
         for tag in verdict.taxonomy:
             taxonomy[tag] += 1
 
-        for name in ("grounding", "completeness", "clauses", "provenance"):
+        for name in dict.fromkeys(outcome.name for turn in verdict.turns for outcome in turn.criteria):
+            criteria_scores.setdefault(name, [])
+            criteria_dist.setdefault(name, Counter())
             outcomes = [
                 outcome
                 for turn in verdict.turns
@@ -182,7 +184,7 @@ def build_report(store: CampaignStore, manifest: CampaignManifest) -> CampaignRe
             mean_score=round(sum(criteria_scores[name]) / len(criteria_scores[name]), 2) if criteria_scores[name] else 0.0,
             distribution=dict(sorted(criteria_dist[name].items())),
         )
-        for name in ("grounding", "completeness", "clauses", "provenance")
+        for name in criteria_scores
         if criteria_judged[name]
     ]
     report.mean_score = round(sum(attempt_scores) / len(attempt_scores), 2) if attempt_scores else 0.0

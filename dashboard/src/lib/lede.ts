@@ -43,6 +43,11 @@ const CRITERION: Record<string, { kicker: string; low: string; mid: string }> = 
     low: 'Required conditions were never stated',
     mid: 'A required condition is only half stated',
   },
+  customer_care: {
+    kicker: 'customer care',
+    low: 'The reply sounds internal or research-like, not like TIM support',
+    mid: 'The reply is useful but not focused customer care',
+  },
   provenance: {
     kicker: 'provenance',
     low: 'Sources that do not exist in the payload',

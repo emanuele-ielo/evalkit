@@ -128,6 +128,7 @@ def _expected_view(
         user_message=scenario_turn.get("user_message"),
         reference_response=scenario_turn.get("reference_response"),
         expected_output=scenario_turn.get("expected_output"),
+        metadata=scenario_turn.get("metadata") if isinstance(scenario_turn.get("metadata"), dict) else {},
         tools_allowed=list(scenario_turn.get("tools_allowed") or []),
         assertions=list(scenario_turn.get("assertions") or []),
         judge_model=scenario_turn.get("judge_model"),

@@ -187,6 +187,7 @@ export interface TurnView {
     user_message: string | null
     reference_response: string | null
     expected_output: string | null
+    metadata: Record<string, unknown>
     tools_allowed: string[]
     assertions: Record<string, unknown>[]
     judge_model: string | null
@@ -263,8 +264,9 @@ export interface VoteVerdict {
   completeness_score: number
   clauses: { clause: string; status: string; evidence_quote: string; note: string }[]
   clauses_score: number
-  provenance: { cited_sources: string[]; invented_sources: string[]; correct: boolean; note: string }
-  provenance_score: number
+  customer_care_score?: number | null
+  provenance?: { cited_sources: string[]; invented_sources: string[]; correct: boolean; note: string } | null
+  provenance_score?: number | null
   taxonomy: string[]
   explanation: string
   suggestion: string

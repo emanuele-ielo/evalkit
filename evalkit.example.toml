@@ -29,7 +29,7 @@ env_files = [
 
 [rubric]
 # Criteria that make up the score (equal weight, median across votes).
-required = ["grounding", "completeness", "clauses", "provenance"]
+required = ["grounding", "completeness", "clauses", "customer_care"]
 # The score is the verdict; these only derive a binary read for comparing with
 # the platform's pass/fail judge.
 pass_threshold = 4.0

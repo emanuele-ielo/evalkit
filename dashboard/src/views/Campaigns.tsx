@@ -1,46 +1,107 @@
 import { api, useAsync } from '../api'
-import { Empty, ErrorBox, Pill, ago, hasScores, num } from '../components/bits'
+import { Empty, ErrorBox, MetricHint, ago, hasScores, num } from '../components/bits'
 import type { CampaignSummary } from '../types'
 
-function Figure({ campaign }: { campaign: CampaignSummary }) {
+function MetricLabel({ children, help, align = 'left' }: { children: string; help: string; align?: 'left' | 'right' }) {
+  return (
+    <span className="metric-label">
+      <MetricHint label={children} align={align}>
+        {help}
+      </MetricHint>
+    </span>
+  )
+}
+
+function CampaignResult({ campaign }: { campaign: CampaignSummary }) {
   const report = campaign.report
+
   if (!report || report.attempts_judged === 0) {
     return (
-      <div className="figure">
-        <span className="hero-num" style={{ color: 'var(--fg-5)' }}>
-          —
-        </span>
-        <span className="faint" style={{ fontSize: 11.5 }}>
-          collected, not judged
-        </span>
+      <div className="campaign-result pending">
+        <div className="campaign-primary">
+          <MetricLabel
+            help="Evalkit collected the results, but its judge has not reviewed them yet. A score will appear after judging."
+          >
+            Evaluation
+          </MetricLabel>
+          <strong className="result-state">Not judged</strong>
+        </div>
+        <div className="campaign-metric">
+          <strong>{num(campaign.scenarios)}</strong>
+          <MetricLabel help="Scenarios are the distinct test cases used to check how the agent behaves.">scenarios</MetricLabel>
+        </div>
+        <div className="campaign-metric">
+          <strong>{num(campaign.attempts)}</strong>
+          <MetricLabel
+            help="An attempt is one execution of a scenario. Repeating a scenario across rounds creates multiple attempts."
+            align="right"
+          >
+            attempts
+          </MetricLabel>
+        </div>
       </div>
     )
   }
+
   if (!hasScores(report)) {
     return (
-      <div className="figure">
-        <span className="hero-num" style={{ color: 'var(--fg-5)' }}>
-          —
-        </span>
-        <span className="faint" style={{ fontSize: 11.5 }}>
-          rubric {campaign.judge?.rubric_version ?? 'v1'} — pass/fail, no score
-          <br />
-          {report.our_majority_pass}/{report.scenarios_total} scenarios pass
-        </span>
+      <div className="campaign-result">
+        <div className="campaign-primary">
+          <MetricLabel help="A scenario passes when it succeeds in most of its evaluated rounds.">
+            Scenarios passed
+          </MetricLabel>
+          <strong className="result-fraction">
+            {report.our_majority_pass}<small> / {report.scenarios_total}</small>
+          </strong>
+        </div>
+        <div className="campaign-metric">
+          <strong>Pass/fail</strong>
+          <MetricLabel help="This campaign used an older yes-or-no evaluation, so it has no score from 1 to 5.">
+            rubric
+          </MetricLabel>
+        </div>
+        <div className="campaign-metric">
+          <strong>{num(report.attempts_judged)}</strong>
+          <MetricLabel
+            help="The number of individual attempts that Evalkit's judge has reviewed."
+            align="right"
+          >
+            attempts judged
+          </MetricLabel>
+        </div>
       </div>
     )
   }
+
   return (
-    <div className="figure">
-      <span className="hero-num">
-        {report.mean_score.toFixed(2)}
-        <small> / 5</small>
-      </span>
-      <span className="faint" style={{ fontSize: 11.5 }}>
-        {report.attempts_judged} attempts judged
-        <br />
-        {report.our_majority_pass}/{report.scenarios_total} scenarios above threshold
-      </span>
+    <div className="campaign-result">
+      <div className="campaign-primary">
+        <MetricLabel help="The average score across judged attempts, from 1 (poor) to 5 (excellent).">
+          Average score
+        </MetricLabel>
+        <strong className="result-score">
+          {report.mean_score.toFixed(2)}<small> / 5</small>
+        </strong>
+      </div>
+      <div className="campaign-metric">
+        <strong>
+          {report.our_majority_pass}<small> / {report.scenarios_total}</small>
+        </strong>
+        <MetricLabel help="The first number is how many test cases passed in most rounds; the second is the total tested.">
+          scenarios passed
+        </MetricLabel>
+      </div>
+      <div className="campaign-metric">
+        <strong>
+          {report.attempts_judged}<small> / {campaign.attempts}</small>
+        </strong>
+        <MetricLabel
+          help="The first number has been reviewed by Evalkit's judge; the second is the total number collected."
+          align="right"
+        >
+          attempts judged
+        </MetricLabel>
+      </div>
     </div>
   )
 }
@@ -53,13 +114,15 @@ export default function Campaigns() {
       <div className="run-head">
         <div className="titles">
           <h1>Campaigns</h1>
-          <p className="lede">
-            Every eval run evalkit has collected — imported history and live runs, scored 1–5 with our rubric and set
-            against the platform judge on the very same attempts.
-          </p>
+          <p className="lede">Compare evaluation runs, then open one to inspect its scenarios and attempts.</p>
         </div>
         <span className="spacer" />
-        <button className="button" onClick={reload}>
+        <button
+          className="button"
+          onClick={reload}
+          disabled={loading}
+          title="Fetch the latest campaign status and results"
+        >
           Refresh
         </button>
       </div>
@@ -77,38 +140,44 @@ export default function Campaigns() {
       <div className="campaign-grid">
         {data?.map((campaign) => {
           const running = (campaign.status_counts.running ?? 0) > 0
-          const unjudged = campaign.attempts - (campaign.status_counts.judged ?? 0)
           return (
-            <a key={campaign.id} className="campaign-card" href={`#/c/${encodeURIComponent(campaign.id)}`}>
-              <div className="head">
-                <div style={{ minWidth: 0 }}>
-                  <div className="label">{campaign.label}</div>
-                  <div className="id">{campaign.id}</div>
+            <article key={campaign.id} className="campaign-card">
+              <div className="campaign-card-top">
+                <div className="campaign-kind">
+                  {running && <span className="pulse" title="Attempts in flight" />}
+                  <span>{running ? 'Running' : campaign.kind}</span>
                 </div>
-                <span className="spacer" />
-                {running && <span className="pulse" title="attempts in flight" />}
-                <Pill tone={campaign.kind === 'live' ? 'accent' : 'default'}>{campaign.kind}</Pill>
+                <time dateTime={campaign.updated_at || campaign.created_at}>
+                  Updated {ago(campaign.updated_at || campaign.created_at)}
+                </time>
               </div>
 
-              <Figure campaign={campaign} />
+              <h2 className="campaign-title">
+                <a href={`#/c/${encodeURIComponent(campaign.id)}`} aria-label={`Open campaign ${campaign.label}`}>
+                  {campaign.label}
+                </a>
+              </h2>
 
-              <div className="faint" style={{ fontSize: 11.5 }}>
-                {num(campaign.attempts)} attempts · {campaign.scenarios} scenarios × {campaign.rounds} round
-                {campaign.rounds === 1 ? '' : 's'}
-                {unjudged > 0 && ` · ${unjudged} not judged`}
-              </div>
+              <CampaignResult campaign={campaign} />
 
-              <div className="meta">
-                {campaign.agent_model && <Pill mono>{campaign.agent_model}</Pill>}
-                {campaign.judge && (
-                  <Pill mono title={`rubric ${campaign.judge.rubric_version}`}>
-                    judge {campaign.judge.model} ×{campaign.judge.votes}
-                  </Pill>
-                )}
-                {campaign.judge && <Pill mono>rubric {campaign.judge.rubric_version}</Pill>}
-                <Pill>{ago(campaign.updated_at || campaign.created_at)}</Pill>
-              </div>
-            </a>
+              {(campaign.agent_model || campaign.judge) && (
+                <div className="campaign-config">
+                  {campaign.agent_model && (
+                    <span>
+                      <small>Agent</small>
+                      <strong>{campaign.agent_model}</strong>
+                    </span>
+                  )}
+                  {campaign.judge && (
+                    <span>
+                      <small>Judge</small>
+                      <strong>{campaign.judge.model} ×{campaign.judge.votes}</strong>
+                      <em>rubric {campaign.judge.rubric_version}</em>
+                    </span>
+                  )}
+                </div>
+              )}
+            </article>
           )
         })}
       </div>

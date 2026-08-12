@@ -13,19 +13,14 @@ handled because scenario authors reach for them next):
     regex_must_match: [str]     answer must match every pattern
     regex_must_not_match: [str] answer must match none
 
-Two checks derive from the corpus row flags in the tool payloads (rows carry a
+One check derives from the corpus row flags in the tool payloads (rows carry a
 `flags` object set by the ingestion pipeline):
 
-    lob_disclaimer   any row flagged `needs_lob_validation` obliges the answer
-                     to tell the user the data must be confirmed with TIM
     pcv_no_contact   any row flagged `pending_channel_validation` forbids the
                      answer from handing out contact details (phone/PEC/email)
 
-`provenance_literals` (literal date/version markers checked against the payload)
-was removed in rubric v3: it produced a false positive on equivalent-but-not-
-identical spellings ("Ver. 27/02/2025" vs "Ver.27022025") and was mute whenever
-the answer cited nothing — the LLM judge, which sees the payloads, owns that
-question now.
+LOB validation and provenance are deliberately not customer-facing concerns in
+rubric v4: neither creates a deterministic requirement here.
 """
 
 from __future__ import annotations
@@ -33,38 +28,6 @@ from __future__ import annotations
 import re
 
 from .schemas import DeterministicCheck, TurnView
-
-# A tolerant match for the confirm-with-TIM disclaimer the corpus requires when
-# a payload row is flagged `needs_lob_validation`. Dominant real phrasings:
-# "dato da confermare con TIM", "va verificato con TIM", "il caso va verificato
-# con TIM", "da confermare direttamente con TIM"; also accepted: a noun between
-# the preposition and TIM ("va confermato presso un negozio TIM") and active
-# contact phrasings ("contatta TIM per conferma", "per conferma contattare TIM").
-# A deontic marker or a contact-TIM imperative is REQUIRED: statements of fact
-# where TIM does the confirming ("sarà confermata da TIM via SMS", "riceverai
-# la conferma da TIM") are not disclaimers and must NOT match.
-_LOB_DEONTIC = (
-    r"(?:da|va|vanno|andr(?:à|anno)|andrebbe(?:ro)?|è\s+da|sono\s+da|"
-    r"dev(?:e|ono)\s+essere|dovr(?:à|anno)\s+essere|dev'\s?essere)"
-)
-_LOB_VERB = r"(?:conferm|verific|validat|convalid|accertat|controll)\w*"
-_LOB_PREP = r"(?:con|presso|dal|dall[oa]|da|al|all[oa]|ad|a|in|nel|nell[oa])"
-# Active invitations to contact TIM only — participles like "contattato da TIM"
-# (TIM contacts the user: a fact, not a disclaimer) stay out on purpose.
-_LOB_CONTACT = (
-    r"(?:contatta(?:re|te|ci)?|contattando|rivolg(?:iti|etevi|ersi|endosi)|"
-    r"si\s+rivolga|chiam(?:a(?:re|te)?|ando))"
-)
-# Word gaps use [^\s.!?]+ so a match never crosses a sentence boundary.
-LOB_DISCLAIMER_RE = re.compile(
-    # deontic: "<va|da|deve essere|…> <confermare/verificare/…> [gap] <prep> [gap] TIM"
-    rf"\b{_LOB_DEONTIC}\s+{_LOB_VERB}(?:\s+[^\s.!?]+){{0,4}}?\s+{_LOB_PREP}\s+(?:[^\s.!?]+\s+){{0,3}}?TIM\b"
-    # contact-first: "contatta/rivolgiti a/chiama … TIM … conferma/verifica"
-    rf"|\b{_LOB_CONTACT}\s+(?:[^\s.!?]+\s+){{0,3}}?TIM\b[^.!?\n]{{0,60}}\b{_LOB_VERB}"
-    # confirm-first: "per conferma/da verificare … contattando/contattare … TIM"
-    rf"|\b{_LOB_VERB}[^.!?\n]{{0,60}}\b{_LOB_CONTACT}\s+(?:[^\s.!?]+\s+){{0,3}}?TIM\b",
-    re.IGNORECASE,
-)
 
 # Contact details an answer must not hand out while a row is flagged
 # `pending_channel_validation`: phone-looking digit runs (5+ digits, dots,
@@ -268,6 +231,20 @@ def check_turn(turn: TurnView, *, require_tool_call: bool | None = None) -> list
     # -- tool discipline -----------------------------------------------------
     called = [call.name for call in turn.tool_calls]
     allowed = set(turn.expected.tools_allowed)
+    contract = turn.expected.metadata.get("evalkit_v4")
+    if isinstance(contract, dict) and contract.get("response_mode") == "clarify":
+        checks.append(
+            DeterministicCheck(
+                name="clarification_no_tool",
+                passed=not called,
+                detail=(
+                    "underspecified turn correctly paused before retrieval"
+                    if not called
+                    else "agent searched before obtaining the missing decision slot"
+                ),
+                hits=sorted(set(called)),
+            )
+        )
     if allowed:
         outside = sorted({name for name in called if name not in allowed})
         checks.append(
@@ -315,7 +292,10 @@ def check_turn(turn: TurnView, *, require_tool_call: bool | None = None) -> list
 
     needs_tool = require_tool_call
     if needs_tool is None:
-        needs_tool = bool(allowed or declared)
+        if isinstance(contract, dict) and contract.get("response_mode") == "clarify":
+            needs_tool = False
+        else:
+            needs_tool = bool(allowed or declared)
     if needs_tool:
         checks.append(
             DeterministicCheck(
@@ -327,24 +307,6 @@ def check_turn(turn: TurnView, *, require_tool_call: bool | None = None) -> list
         )
 
     # -- corpus row flags, checked against the answer -------------------------
-    lob_rows = _count_flagged_rows(turn, "needs_lob_validation")
-    if lob_rows:
-        has_disclaimer = bool(LOB_DISCLAIMER_RE.search(answer))
-        checks.append(
-            DeterministicCheck(
-                name="lob_disclaimer",
-                passed=has_disclaimer,
-                detail=(
-                    f"{lob_rows} payload row(s) flagged needs_lob_validation and the answer "
-                    "carries the confirm-with-TIM disclaimer"
-                    if has_disclaimer
-                    else f"{lob_rows} payload row(s) flagged needs_lob_validation but the answer "
-                    "never tells the user to confirm with TIM"
-                ),
-                hits=[],
-            )
-        )
-
     pcv_rows = _count_flagged_rows(turn, "pending_channel_validation")
     if pcv_rows:
         contact_hits = contact_detail_hits(answer)
@@ -392,12 +354,12 @@ def taxonomy_from_checks(checks: list[DeterministicCheck]) -> list[str]:
             tags.append("missing_required_fact")
         elif check.name == "tool_call_present":
             tags.append("no_tool_call")
+        elif check.name == "clarification_no_tool":
+            tags.append("premature_tool_call")
         elif check.name == "declared_mocks_called":
             tags.append("no_tool_call")
         elif check.name == "tools_allowed":
             tags.append("wrong_channel_or_procedure")
-        elif check.name == "lob_disclaimer":
-            tags.append("missing_clause")
         elif check.name == "pcv_no_contact":
             tags.append("wrong_channel_or_procedure")
     return sorted(set(tags))

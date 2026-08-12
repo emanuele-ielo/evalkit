@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api, useAsync, useCampaignEvents } from '../api'
-import { Empty, ErrorBox, Pill, Score, Tag, ago, hasScores, num, scoreTone, tokenLine } from '../components/bits'
+import { Empty, ErrorBox, MetricHint, Pill, Score, Tag, ago, hasScores, num, scoreTone, tokenLine } from '../components/bits'
 import type { MatrixCell, MatrixRow, ScenarioOutcome } from '../types'
 
 type Filter = 'all' | 'failing' | 'flaky' | 'disagree' | 'unjudged'
@@ -39,7 +39,7 @@ function RoundPill({ round, cell }: { round: number; cell: MatrixCell | undefine
 /** Official verdict against ours, for one scenario across its rounds. */
 function Agreement({ outcome }: { outcome: ScenarioOutcome | undefined }) {
   if (!outcome || outcome.our_majority === null) {
-    return <span className="agree faint">not judged</span>
+    return <span className="agree faint" title="This scenario does not have an Evalkit verdict yet">not judged</span>
   }
   if (outcome.stability === 'flaky') {
     return (
@@ -51,12 +51,24 @@ function Agreement({ outcome }: { outcome: ScenarioOutcome | undefined }) {
   const ours = outcome.our_majority
   const official = outcome.official_majority
   if (official === null) {
-    return <span className="agree faint">— / {ours ? 'pass' : 'fail'}</span>
+    return (
+      <span className="agree faint" title="Platform verdict unavailable · Evalkit verdict shown second">
+        — / {ours ? 'pass' : 'fail'}
+      </span>
+    )
   }
   const disagree = ours !== official
   const color = disagree ? 'var(--info)' : ours ? 'var(--good)' : 'var(--bad)'
   return (
-    <span className="agree" style={{ color }} title={disagree ? 'we disagree with the platform judge' : undefined}>
+    <span
+      className="agree"
+      style={{ color }}
+      title={
+        disagree
+          ? 'The platform judge and Evalkit reached different pass/fail decisions'
+          : 'The platform judge and Evalkit reached the same pass/fail decision'
+      }
+    >
       {official ? 'pass' : 'fail'} / {ours ? 'pass' : 'fail'}
       {disagree ? ' ≠' : ''}
     </span>
@@ -140,12 +152,12 @@ export default function Campaign({ id }: { id: string }) {
   const taxonomy = Object.entries(report.taxonomy).sort((a, b) => b[1] - a[1])
   const taxonomyTop = taxonomy.length > 0 ? taxonomy[0][1] : 1
 
-  const sortHeader = (key: SortKey, label: string) => (
+  const sortHeader = (key: SortKey, label: string, help?: string) => (
     <button
       onClick={() => setSort((current) => ({ key, dir: current.key === key && current.dir === 'asc' ? 'desc' : 'asc' }))}
-      title={`sort by ${label}`}
+      title={help ? `${help} Click to sort by this column.` : `Sort by ${label}`}
     >
-      {label}
+      <span className={help ? 'metric-text' : undefined}>{label}</span>
       {sort.key === key && <span className="arrow">{sort.dir === 'asc' ? ' ↑' : ' ↓'}</span>}
     </button>
   )
@@ -179,8 +191,12 @@ export default function Campaign({ id }: { id: string }) {
       </div>
 
       <div className="stat-row">
-        <div className="stat" title="mean of the four criteria, median across votes">
-          <span className="k">Mean score</span>
+        <div className="stat">
+          <span className="k">
+            <MetricHint label="Mean score" align="left">
+              Average across the rubric criteria and judged attempts, from 1 (poor) to 5 (excellent).
+            </MetricHint>
+          </span>
           <span className="hero-num">
             {scored ? report.mean_score.toFixed(2) : '—'}
             {scored && <small> / 5</small>}
@@ -194,15 +210,14 @@ export default function Campaign({ id }: { id: string }) {
           </span>
         </div>
 
-        <div
-          className="stat"
-          title={
-            scored
-              ? `scenarios at or above ${report.judge?.pass_threshold ?? 4}/5 in every judged round`
-              : 'scenarios the judge passed in every judged round'
-          }
-        >
-          <span className="k">Pass — every round</span>
+        <div className="stat">
+          <span className="k">
+            <MetricHint label="Pass — every round" align="left">
+              {scored
+                ? `Scenarios scoring at least ${report.judge?.pass_threshold ?? 4}/5 in every judged round.`
+                : 'Scenarios the judge marked as passed in every judged round.'}
+            </MetricHint>
+          </span>
           <span className="hero-num">
             {report.our_all_pass}
             <small> / {report.scenarios_total}</small>
@@ -224,8 +239,12 @@ export default function Campaign({ id }: { id: string }) {
           </span>
         </div>
 
-        <div className="stat" title="scenarios that pass in some rounds and fail in others">
-          <span className="k">Flaky</span>
+        <div className="stat">
+          <span className="k">
+            <MetricHint label="Flaky" align="left">
+              Scenarios that pass in some rounds and fail in others. Fewer is better.
+            </MetricHint>
+          </span>
           <span className="hero-num">
             {judgedRoundsMax > 1 ? flaky : '—'}
             {judgedRoundsMax > 1 && <small> / {report.scenarios_total}</small>}
@@ -239,8 +258,12 @@ export default function Campaign({ id }: { id: string }) {
           </span>
         </div>
 
-        <div className="stat" title="how often our verdict matches the platform judge on the same attempt">
-          <span className="k">Judge agreement</span>
+        <div className="stat">
+          <span className="k">
+            <MetricHint label="Judge agreement" align="right">
+              Percentage of attempts where Evalkit and the platform judge reached the same pass/fail decision.
+            </MetricHint>
+          </span>
           <span className="hero-num">
             {diff.data?.agreement_rate != null ? Math.round(diff.data.agreement_rate * 100) : '—'}
             {diff.data?.agreement_rate != null && <small>%</small>}
@@ -277,7 +300,14 @@ export default function Campaign({ id }: { id: string }) {
 
       <div className="card-row">
         <div className="card">
-          <h3>{scored ? 'Criteria — mean of 5' : 'Criteria — share of attempts passing'}</h3>
+          <h3>
+            <MetricHint
+              label={scored ? 'Criteria — mean of 5' : 'Criteria — share of attempts passing'}
+              align="left"
+            >
+              Each criterion is one dimension of the rubric. The bar summarizes that dimension across judged attempts.
+            </MetricHint>
+          </h3>
           {report.criteria.length === 0 && <span className="faint">nothing judged yet</span>}
           {report.criteria.map((criterion) => {
             // A pass/fail rubric has no per-criterion score, only a pass rate.
@@ -292,7 +322,13 @@ export default function Campaign({ id }: { id: string }) {
                   : 'bad'
             return (
               <div className="bar-row" key={criterion.name}>
-                <span className="name">{criterion.name}</span>
+                <span className="name">
+                  <MetricHint label={criterion.name} align="left">
+                    {scored
+                      ? `Average score for this rubric criterion across ${criterion.attempts_judged} judged attempts.`
+                      : `${criterion.attempts_passed} of ${criterion.attempts_judged} judged attempts passed this criterion.`}
+                  </MetricHint>
+                </span>
                 <span className="bar-track">
                   <span className={`bar-fill ${tone === 'none' ? '' : tone}`} style={{ width: `${width}%` }} />
                 </span>
@@ -307,7 +343,11 @@ export default function Campaign({ id }: { id: string }) {
               {Object.entries(report.score_distribution)
                 .sort((a, b) => Number(a[0]) - Number(b[0]))
                 .map(([score, count]) => (
-                  <Pill key={score} tone={Number(score) >= 4 ? 'good' : Number(score) >= 3 ? 'warn' : 'bad'}>
+                  <Pill
+                    key={score}
+                    tone={Number(score) >= 4 ? 'good' : Number(score) >= 3 ? 'warn' : 'bad'}
+                    title={`${count} judged attempts received a score of ${score} out of 5`}
+                  >
                     {score}★ · {count}
                   </Pill>
                 ))}
@@ -316,7 +356,11 @@ export default function Campaign({ id }: { id: string }) {
           {Object.keys(report.coverage).length > 0 && (
             <div className="dist">
               {Object.entries(report.coverage).map(([key, value]) => (
-                <Pill key={key} tone={key === 'FULL' ? 'good' : key === 'MISS' ? 'bad' : 'warn'}>
+                <Pill
+                  key={key}
+                  tone={key === 'FULL' ? 'good' : key === 'MISS' ? 'bad' : 'warn'}
+                  title={`${value} judged attempts had ${key.toLowerCase()} coverage of the reference facts required for a correct answer`}
+                >
                   reference facts {key.toLowerCase()} · {value}
                 </Pill>
               ))}
@@ -336,20 +380,40 @@ export default function Campaign({ id }: { id: string }) {
           {internals ? (
             <>
               <dl className="kv">
-                <dt>judge tokens</dt>
+                <dt>
+                  <MetricHint label="judge tokens" align="left">
+                    Text units consumed by the AI judge while evaluating this campaign. More tokens generally mean more cost.
+                  </MetricHint>
+                </dt>
                 <dd className="num">{tokenLine(report.tokens)}</dd>
-                <dt>agent tokens</dt>
+                <dt>
+                  <MetricHint label="agent tokens" align="left">
+                    Text units consumed by the tested agent while producing its answers.
+                  </MetricHint>
+                </dt>
                 <dd className="num">{tokenLine(report.agent_tokens)}</dd>
-                <dt>traces</dt>
+                <dt>
+                  <MetricHint label="traces" align="left">
+                    Attempts with a detailed execution trace available, out of all collected attempts.
+                  </MetricHint>
+                </dt>
                 <dd className="num">
                   {report.trace_coverage}/{report.attempts_collected}
                   {report.trace_coverage < report.attempts_collected && ' · expired ones carry no system prompt'}
                 </dd>
-                <dt>activities</dt>
+                <dt>
+                  <MetricHint label="activities" align="left">
+                    Attempts with a platform activity record available, out of all collected attempts.
+                  </MetricHint>
+                </dt>
                 <dd className="num">
                   {report.activity_coverage}/{report.attempts_collected}
                 </dd>
-                <dt>per round</dt>
+                <dt>
+                  <MetricHint label="per round" align="left">
+                    Number of scenarios that passed in each repeated evaluation round.
+                  </MetricHint>
+                </dt>
                 <dd className="num">
                   {Object.entries(report.per_round_pass)
                     .map(([round, passes]) => `r${round}: ${passes}`)
@@ -357,7 +421,11 @@ export default function Campaign({ id }: { id: string }) {
                 </dd>
                 {Object.keys(report.deterministic_failures).length > 0 && (
                   <>
-                    <dt>checks failing</dt>
+                    <dt>
+                      <MetricHint label="checks failing" align="left">
+                        Mechanical rule checks that failed, with the number of affected attempts.
+                      </MetricHint>
+                    </dt>
                     <dd>
                       <div className="dist">
                         {Object.entries(report.deterministic_failures).map(([name, count]) => (
@@ -455,16 +523,28 @@ export default function Campaign({ id }: { id: string }) {
             onChange={(event) => setQuery(event.target.value)}
           />
           <span className="count">
-            {rows.length} of {data.matrix.length} shown
+            <MetricHint label={`${rows.length} of ${data.matrix.length} shown`} align="right">
+              Scenarios currently visible after applying the selected filters, out of the campaign total.
+            </MetricHint>
           </span>
         </div>
 
         <div className="table">
           <div className="trow thead">
             {sortHeader('scenario', 'Scenario')}
-            <span>Rounds</span>
-            {sortHeader('score', 'Score')}
-            <span className="agree">{sortHeader('official', 'Official / ours')}</span>
+            <span>
+              <MetricHint label="Rounds" align="left">
+                Repeated executions of the same scenario. Repetition reveals unstable results.
+              </MetricHint>
+            </span>
+            {sortHeader('score', 'Score', 'Average Evalkit score for this scenario across its judged rounds.')}
+            <span className="agree">
+              {sortHeader(
+                'official',
+                'Official / ours',
+                'The platform judge verdict compared with Evalkit’s verdict for the same scenario.',
+              )}
+            </span>
             <span>Failure tags</span>
           </div>
           {rows.length === 0 && <Empty>nothing matches this filter</Empty>}
