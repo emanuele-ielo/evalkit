@@ -12,6 +12,20 @@ handled because scenario authors reach for them next):
     must_contain_any: [str]     at least one must appear
     regex_must_match: [str]     answer must match every pattern
     regex_must_not_match: [str] answer must match none
+
+Two checks derive from the corpus row flags in the tool payloads (rows carry a
+`flags` object set by the ingestion pipeline):
+
+    lob_disclaimer   any row flagged `needs_lob_validation` obliges the answer
+                     to tell the user the data must be confirmed with TIM
+    pcv_no_contact   any row flagged `pending_channel_validation` forbids the
+                     answer from handing out contact details (phone/PEC/email)
+
+`provenance_literals` (literal date/version markers checked against the payload)
+was removed in rubric v3: it produced a false positive on equivalent-but-not-
+identical spellings ("Ver. 27/02/2025" vs "Ver.27022025") and was mute whenever
+the answer cited nothing — the LLM judge, which sees the payloads, owns that
+question now.
 """
 
 from __future__ import annotations
@@ -20,27 +34,155 @@ import re
 
 from .schemas import DeterministicCheck, TurnView
 
-# Source/version markers an answer may cite: `V. 16.02.2026`, `16/02/2026`,
-# `Aprile 2023`, `April 2023`. Checking these literally against the payload is
-# the cheap half of the "invented provenance" question — and the reliable half:
-# the platform judge produced false accusations here precisely because it was
-# shown a truncated payload and could not find text that was really there.
-_MONTHS = (
-    "gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre"
-    "|january|february|march|april|may|june|july|august|september|october|november|december"
+# A tolerant match for the confirm-with-TIM disclaimer the corpus requires when
+# a payload row is flagged `needs_lob_validation`. Dominant real phrasings:
+# "dato da confermare con TIM", "va verificato con TIM", "il caso va verificato
+# con TIM", "da confermare direttamente con TIM"; also accepted: a noun between
+# the preposition and TIM ("va confermato presso un negozio TIM") and active
+# contact phrasings ("contatta TIM per conferma", "per conferma contattare TIM").
+# A deontic marker or a contact-TIM imperative is REQUIRED: statements of fact
+# where TIM does the confirming ("sarà confermata da TIM via SMS", "riceverai
+# la conferma da TIM") are not disclaimers and must NOT match.
+_LOB_DEONTIC = (
+    r"(?:da|va|vanno|andr(?:à|anno)|andrebbe(?:ro)?|è\s+da|sono\s+da|"
+    r"dev(?:e|ono)\s+essere|dovr(?:à|anno)\s+essere|dev'\s?essere)"
 )
-PROVENANCE_RE = re.compile(
-    rf"(V\.\s?\d{{1,2}}[./]\d{{1,2}}[./]\d{{4}}|\d{{1,2}}[./]\d{{1,2}}[./]\d{{4}}|(?:{_MONTHS})\s+\d{{4}})",
+_LOB_VERB = r"(?:conferm|verific|validat|convalid|accertat|controll)\w*"
+_LOB_PREP = r"(?:con|presso|dal|dall[oa]|da|al|all[oa]|ad|a|in|nel|nell[oa])"
+# Active invitations to contact TIM only — participles like "contattato da TIM"
+# (TIM contacts the user: a fact, not a disclaimer) stay out on purpose.
+_LOB_CONTACT = (
+    r"(?:contatta(?:re|te|ci)?|contattando|rivolg(?:iti|etevi|ersi|endosi)|"
+    r"si\s+rivolga|chiam(?:a(?:re|te)?|ando))"
+)
+# Word gaps use [^\s.!?]+ so a match never crosses a sentence boundary.
+LOB_DISCLAIMER_RE = re.compile(
+    # deontic: "<va|da|deve essere|…> <confermare/verificare/…> [gap] <prep> [gap] TIM"
+    rf"\b{_LOB_DEONTIC}\s+{_LOB_VERB}(?:\s+[^\s.!?]+){{0,4}}?\s+{_LOB_PREP}\s+(?:[^\s.!?]+\s+){{0,3}}?TIM\b"
+    # contact-first: "contatta/rivolgiti a/chiama … TIM … conferma/verifica"
+    rf"|\b{_LOB_CONTACT}\s+(?:[^\s.!?]+\s+){{0,3}}?TIM\b[^.!?\n]{{0,60}}\b{_LOB_VERB}"
+    # confirm-first: "per conferma/da verificare … contattando/contattare … TIM"
+    rf"|\b{_LOB_VERB}[^.!?\n]{{0,60}}\b{_LOB_CONTACT}\s+(?:[^\s.!?]+\s+){{0,3}}?TIM\b",
     re.IGNORECASE,
 )
+
+# Contact details an answer must not hand out while a row is flagged
+# `pending_channel_validation`: phone-looking digit runs (5+ digits, dots,
+# spaces or hyphens allowed between them), the canonical 3-digit TIM service
+# numbers (119, 187), and email/PEC addresses. Not contact details: dates,
+# euro amounts ("16.02.2026", "0,01953 €/KB"), quantities with a unit
+# ("12345 KB", "10.000 punti") and digits labelled as codes/IDs
+# ("codice fiscale 12345678901") — all shapes seen in real telco answers.
+PHONE_SEQ_RE = re.compile(r"\d(?:[\s.\-]?\d){4,}")
+# 3-digit TIM service numbers, standalone: not glued to other digits, not a
+# decimal/date fragment ("119,90", "1.119", "16.02.119" stay out).
+SHORT_CONTACT_RE = re.compile(r"(?<![\d.,/\-])\b(?:119|187)\b(?![.,/\-]?\d)")
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+_DATE_SHAPE_RE = re.compile(r"\d{1,2}[.\s/]\d{1,2}[.\s/]\d{2,4}|\d{1,2}[.\s]\d{4}")
+_PRICE_CONTEXT_RE = re.compile(r"€|euro|eur\b", re.IGNORECASE)
+_PRICE_WINDOW = 12  # chars around a digit run in which €/euro marks it a price
+# Thousands-separated quantities ("10.000", "1 500") are amounts, not phones.
+_THOUSANDS_SHAPE_RE = re.compile(r"\d{1,3}(?:[.\s]\d{3})+")
+_THOUSANDS_MAX_DIGITS = 7  # a 9-digit "800.123.456" is still a phone number
+# A measurement unit right after the digits marks a quantity ("12345 KB").
+_UNIT_AFTER_RE = re.compile(
+    r"^\s{0,2}(?:kb|mb|gb|tb|kbps|mbps|gbps|sms|min(?:uti)?|punti|giga|mega|ore|giorni|mesi)\b",
+    re.IGNORECASE,
+)
+# A code/ID label right before the digits marks a non-contact identifier
+# ("codice fiscale 12345678901", "numero pratica: 88231").
+_ID_CONTEXT_RE = re.compile(
+    r"(?:codice|c\.?f\.?|fiscale|p(?:artita)?\.?\s*iva|pratica|ordine|contratto|"
+    r"cliente|fattura|iccid|serial\w*|matricola|sim)"
+    r"\s*(?:n(?:r|um(?:ero)?)?\.?°?\s*)?[:=]?\s*$",
+    re.IGNORECASE,
+)
+_ID_WINDOW = 24  # chars before a digit run in which an ID label may sit
+
+
+def _looks_like_compact_date(digits: str) -> bool:
+    """True for 8-digit runs that read as ddmmyyyy or yyyymmdd."""
+    if len(digits) != 8:
+        return False
+    day, month, year = int(digits[:2]), int(digits[2:4]), int(digits[4:])
+    if 1 <= day <= 31 and 1 <= month <= 12 and 1990 <= year <= 2099:
+        return True
+    year2, month2, day2 = int(digits[:4]), int(digits[4:6]), int(digits[6:])
+    return 1990 <= year2 <= 2099 and 1 <= month2 <= 12 and 1 <= day2 <= 31
+
+
+def _non_contact_context(answer: str, start: int, end: int) -> bool:
+    """True when surrounding text marks the digits as a price, quantity or ID."""
+    price_before = answer[max(0, start - _PRICE_WINDOW) : start]
+    price_after = answer[end : end + _PRICE_WINDOW]
+    if _PRICE_CONTEXT_RE.search(price_before) or _PRICE_CONTEXT_RE.search(price_after):
+        return True
+    if _UNIT_AFTER_RE.match(answer[end : end + 12]):
+        return True
+    return bool(_ID_CONTEXT_RE.search(answer[max(0, start - _ID_WINDOW) : start]))
+
+
+def contact_detail_hits(answer: str) -> list[str]:
+    """Phone numbers and email/PEC addresses found in the answer.
+
+    Excludes date-shaped matches, digit runs with €/euro nearby (prices),
+    thousands-separated quantities, unit-suffixed quantities and labelled
+    codes/IDs. Includes the standalone TIM service numbers 119 and 187.
+    """
+    hits: list[str] = []
+    for match in PHONE_SEQ_RE.finditer(answer):
+        text = match.group(0)
+        if _DATE_SHAPE_RE.fullmatch(text.strip()):
+            continue
+        digits = re.sub(r"\D", "", text)
+        if _looks_like_compact_date(digits):
+            continue
+        if len(digits) <= _THOUSANDS_MAX_DIGITS and _THOUSANDS_SHAPE_RE.fullmatch(text.strip()):
+            continue
+        if _non_contact_context(answer, match.start(), match.end()):
+            continue
+        hits.append(text)
+    for match in SHORT_CONTACT_RE.finditer(answer):
+        if not _non_contact_context(answer, match.start(), match.end()):
+            hits.append(match.group(0))
+    hits.extend(match.group(0) for match in EMAIL_RE.finditer(answer))
+    return hits
+
+
+def _count_flagged_rows(turn: TurnView, flag: str) -> int:
+    """How many payload rows in this turn carry `flags.<flag> == true`."""
+    count = 0
+
+    def walk(node: object) -> None:
+        nonlocal count
+        if isinstance(node, dict):
+            flags = node.get("flags")
+            if isinstance(flags, dict) and flags.get(flag):
+                count += 1
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    for call in turn.tool_calls:
+        if call.output is not None and not isinstance(call.output, str):
+            walk(call.output)
+        elif call.output_raw:
+            # unwrap_tool_output returns the raw STRING as the payload when it
+            # is not parseable JSON (truncated payloads included), so a string
+            # `output` gives walk() nothing to inspect — scan the raw text
+            # instead, or a set flag silently skips a blocking check
+            # (fail-open). Tolerate JSON-in-a-JSON-string quoting too
+            # (\"flag\": true).
+            count += len(
+                re.findall(rf'\\?"{re.escape(flag)}\\?"\s*:\s*true', call.output_raw)
+            )
+    return count
 
 
 def _answer_haystack(turn: TurnView) -> str:
     return turn.agent_text or ""
-
-
-def _payload_haystack(turn: TurnView) -> str:
-    return "\n".join(call.output_raw for call in turn.tool_calls)
 
 
 def check_turn(turn: TurnView, *, require_tool_call: bool | None = None) -> list[DeterministicCheck]:
@@ -184,23 +326,40 @@ def check_turn(turn: TurnView, *, require_tool_call: bool | None = None) -> list
             )
         )
 
-    # -- provenance markers, checked literally against the payload -----------
-    cited = {match.strip() for match in PROVENANCE_RE.findall(answer)}
-    if cited:
-        payload = _payload_haystack(turn)
-        payload_lower = payload.lower()
-        unbacked = sorted(marker for marker in cited if marker.lower() not in payload_lower)
+    # -- corpus row flags, checked against the answer -------------------------
+    lob_rows = _count_flagged_rows(turn, "needs_lob_validation")
+    if lob_rows:
+        has_disclaimer = bool(LOB_DISCLAIMER_RE.search(answer))
         checks.append(
             DeterministicCheck(
-                name="provenance_literals",
-                passed=not unbacked,
+                name="lob_disclaimer",
+                passed=has_disclaimer,
                 detail=(
-                    f"every cited date/version marker appears in the payload ({', '.join(sorted(cited))})"
-                    if not unbacked
-                    else "cited date/version marker(s) do not appear anywhere in the payload"
+                    f"{lob_rows} payload row(s) flagged needs_lob_validation and the answer "
+                    "carries the confirm-with-TIM disclaimer"
+                    if has_disclaimer
+                    else f"{lob_rows} payload row(s) flagged needs_lob_validation but the answer "
+                    "never tells the user to confirm with TIM"
                 ),
-                hits=unbacked,
-                blocking=False,
+                hits=[],
+            )
+        )
+
+    pcv_rows = _count_flagged_rows(turn, "pending_channel_validation")
+    if pcv_rows:
+        contact_hits = contact_detail_hits(answer)
+        checks.append(
+            DeterministicCheck(
+                name="pcv_no_contact",
+                passed=not contact_hits,
+                detail=(
+                    f"{pcv_rows} payload row(s) flagged pending_channel_validation and the answer "
+                    "hands out no contact detail"
+                    if not contact_hits
+                    else f"{pcv_rows} payload row(s) flagged pending_channel_validation but the answer "
+                    f"hands out {len(contact_hits)} contact detail(s)"
+                ),
+                hits=sorted(set(contact_hits)),
             )
         )
 
@@ -237,6 +396,8 @@ def taxonomy_from_checks(checks: list[DeterministicCheck]) -> list[str]:
             tags.append("no_tool_call")
         elif check.name == "tools_allowed":
             tags.append("wrong_channel_or_procedure")
-        elif check.name == "provenance_literals":
-            tags.append("invented_provenance")
+        elif check.name == "lob_disclaimer":
+            tags.append("missing_clause")
+        elif check.name == "pcv_no_contact":
+            tags.append("wrong_channel_or_procedure")
     return sorted(set(tags))

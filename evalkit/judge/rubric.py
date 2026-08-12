@@ -24,7 +24,14 @@ from typing import Any
 
 from ..schemas import AttemptView, DeterministicCheck, ToolCallView, TurnView
 
-RUBRIC_VERSION = "v2"
+# v3 (2026-08-12): completeness moved to a proportional scale with an explicit
+# "directly asked fact" gate and meta-sentence exclusion; clauses narrowed to
+# prose caveats with a mandatory payload locator and an anti-double-counting
+# rule (topic omissions belong to completeness); the machine-checkable corpus
+# flags (needs_lob_validation, pending_channel_validation) moved to blocking
+# deterministic checks; provenance_literals retired. v2 verdicts on disk stay
+# readable — the schema is unchanged, only prompt semantics and this tag moved.
+RUBRIC_VERSION = "v3"
 
 # Per-call payload budget in the prompt. Payloads here run to ~31 KB; the cap is
 # generous on purpose and truncation is always announced to the judge.
@@ -74,23 +81,49 @@ answer is a 3, not a 2 out of caution.
    is central to the answer; 1 when any claim is CONTRADICTED.
 
 2. COMPLETENESS — take the REFERENCE FACTS (and, when present, the REFERENCE ANSWER) as
-   the list of things this answer owed the user. For each fact: FULL (conveyed, any
-   wording), PARTIAL (hinted, incomplete, or hedged), MISS (absent). `evidence_quote`
-   quotes the agent's own words for FULL/PARTIAL, "" for MISS.
-   `completeness_coverage` = FULL when every fact is FULL, MISS when every fact is MISS,
-   otherwise PARTIAL. `completeness_score`: 5 when every fact is FULL; 4 when all are
-   conveyed but some only PARTIAL; 3 when a secondary fact is MISS; 2 when the fact the
-   user actually asked for is MISS — including a refusal or hedge on a question the payload
-   answers; 1 when nothing asked for was conveyed.
+   the list of things this answer owed the user.
+   First separate out meta sentences: pure behaviour phrases carry no fact — disclaimers
+   ("da confermare con TIM"), inability statements ("non posso verificare"), greetings,
+   offers to help, connectives. List each such reference item in `facts` with a `note`
+   that STARTS with `meta:true` and exclude it from every count below; do not let a
+   present disclaimer raise the score or an absent one lower it here.
+   For each real fact: FULL (conveyed, any wording), PARTIAL (hinted, incomplete, or
+   hedged), MISS (absent). `evidence_quote` quotes the agent's own words for FULL/PARTIAL,
+   "" for MISS. Exactly one fact is the one the user directly asked for: start its `note`
+   with `asked:true`.
+   Coverage is proportional over the non-meta facts: FULL counts 1, PARTIAL counts 0.5,
+   MISS counts 0; coverage = sum ÷ number of non-meta facts.
+   `completeness_coverage` = FULL when every non-meta fact is FULL, MISS when every one is
+   MISS, otherwise PARTIAL. `completeness_score` follows the proportion — do NOT cap at 3
+   for one secondary MISS:
+   - 5 = every non-meta fact is FULL.
+   - 4 = coverage ≥ 0.8 AND the asked fact is FULL or PARTIAL.
+   - 3 = coverage ≥ 0.5 AND the asked fact is FULL or PARTIAL.
+   - 2 = the asked fact is MISS — including a refusal or hedge on a question the payload
+     answers — or coverage < 0.5.
+   - 1 = nothing the user asked for was conveyed.
 
-3. CLAUSES — conditions, caveats and prerequisites that the payload marks as mandatory
-   to relay (validity conditions, "only if", required confirmations, costs that apply,
-   who may request it). List each one you find in the payload and whether the answer
-   relayed it: PRESENT, PARTIAL, ABSENT, or NOT_REQUIRED when the payload attaches no
-   such condition to what was asked. `clauses_score`: 5 when every required clause is
-   PRESENT (or none is required); 4 when one is PARTIAL; 3 when a minor one is ABSENT;
-   2 when an ABSENT clause could cost the user money or a failed procedure; 1 when the
-   answer actively contradicts a condition in the payload.
+3. CLAUSES — prose caveats only. A clause is a condition, caveat or prerequisite that the
+   payload attaches IN PROSE to something the answer actually talked about: validity
+   conditions, "only if", required confirmations, costs that apply, who may request it.
+   Two hard rules decide whether a clause row is valid at all:
+   - Every clause row's `note` MUST start with the payload locator of the text stating the
+     condition, e.g. `loc:search_vera#0.results[3].body — …`. A row you cannot anchor with
+     a locator is invalid — do not write it.
+   - NEVER list a clause about a topic the answer never treated. Omitting a whole topic is
+     a completeness defect and is already priced there; punishing the same omission again
+     under clauses is double counting, and it is forbidden.
+   Machine row-flags (needs_lob_validation, pending_channel_validation) are enforced in
+   code and reported under DETERMINISTIC FINDINGS — do not re-grade them here.
+   Status per clause: PRESENT, PARTIAL, ABSENT, or NOT_REQUIRED when the payload attaches
+   no such condition to what was asked. `clauses_score` is anchored to the counts:
+   - 5 = no clause was required, or every required clause is PRESENT.
+   - 4 = one or more clauses are PARTIAL and none is ABSENT.
+   - 3 = exactly one ABSENT clause, of minor consequence (regardless of PARTIALs).
+   - 2 = two or more ABSENT clauses, or one ABSENT clause that could cost the user money
+     or a failed procedure.
+   - 1 = the answer actively contradicts a condition in the payload.
+   With zero ABSENT and zero PARTIAL rows the score is 5 — never lower.
 
 4. PROVENANCE — list in `cited_sources` every source, version or validity marker the
    answer cites (e.g. "V. 16.02.2026", a portal name given as the source). List in

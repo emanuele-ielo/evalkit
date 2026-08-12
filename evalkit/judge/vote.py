@@ -12,8 +12,12 @@ Two decisions worth stating, because they are what make the number stable:
   binary judge, so agreement stays measurable.
 
 Mechanical failures **cap** the score instead of vetoing it: a leaked internal
-field or a missing tool call means the answer cannot be better than a 2, whatever
-the LLM thought of the prose.
+field, a missing tool call, a missing confirm-with-TIM disclaimer on LOB-flagged
+rows (`lob_disclaimer`) or a contact detail handed out while a row is pending
+channel validation (`pcv_no_contact`) means the answer cannot be better than a 2,
+whatever the LLM thought of the prose. Any blocking `DeterministicCheck` flows
+through `blocking_failures()` by name-agnostic contract, so new checks join the
+cap without changes here.
 """
 
 from __future__ import annotations
