@@ -1,0 +1,54 @@
+# Copy to `evalkit.toml` and fill in your own agent. No secrets belong in this
+# file — LLM credentials are read at runtime from the env files named below and
+# are never logged or persisted.
+
+[paths]
+data_dir = "data"
+
+[llm]
+# Judge model. `claude-*` goes to Anthropic (native json_schema structured
+# output); `gpt-5*`/`o*` use OpenAI's Responses API with `reasoning`.
+model = "claude-sonnet-5"
+# OpenAI reasoning models only.
+reasoning_effort = "medium"
+votes = 3
+# Concurrent judge LLM calls across the whole process. Raise it as far as your
+# provider's rate limits allow — the judge is embarrassingly parallel.
+concurrency = 6
+max_retries = 3
+# Requests per second ceiling for judge calls (0 disables the limiter).
+requests_per_second = 3.0
+# Anthropic requires max_tokens, and it caps thinking + verdict together.
+max_output_tokens = 24000
+# Searched in order for the provider key the judge needs (OPENAI_API_KEY /
+# ANTHROPIC_API_KEY). Read at runtime only, never logged or persisted.
+env_files = [
+    "~/path/to/your/agents.env",
+    "~/path/to/your/controller.env",
+]
+
+[rubric]
+# Criteria that make up the score (equal weight, median across votes).
+required = ["grounding", "completeness", "clauses", "provenance"]
+# The score is the verdict; these only derive a binary read for comparing with
+# the platform's pass/fail judge.
+pass_threshold = 4.0
+min_criterion_score = 3
+
+# ---------------------------------------------------------------------------
+# Agent profiles. `evalkit run --agent <name>` picks one of these.
+# ---------------------------------------------------------------------------
+
+[agents.myagent]
+# The agent slug as the platform knows it, and its id.
+slug = "my-agent"
+id = "00000000-0000-0000-0000-000000000000"
+# wful profile and workspace. Both are passed explicitly on every command so a
+# run can never land in the wrong tenant.
+wful_profile = "my-profile"
+workspace = "00000000-0000-0000-0000-000000000000"
+repo = "~/path/to/agent-repo"
+# Default scenario set: the batch file listing the scenario slugs to run.
+batch = "my_batch"
+concurrency = 4
+rounds = 3
