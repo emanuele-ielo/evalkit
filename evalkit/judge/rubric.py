@@ -29,6 +29,9 @@ from ..schemas import AttemptView, DeterministicCheck, ToolCallView, TurnView
 # LOB validation is no longer model-facing or graded. Underspecified requests
 # are judged conversationally: one focused clarification can be the complete
 # answer for that turn. Historical v1-v3 verdicts remain readable on disk.
+# This versions the prompt and structured vote semantics. The downstream pass
+# bridge is independently persisted in JudgeSettings, so changing only its
+# thresholds does not invalidate or spend new LLM votes.
 RUBRIC_VERSION = "v4"
 
 # Per-call payload budget in the prompt. Payloads here run to ~31 KB; the cap is

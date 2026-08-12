@@ -362,6 +362,10 @@ def format_report(report: CampaignReport, *, compact: bool = False) -> str:
             f"judge: {report.judge.model} x{report.judge.votes} votes, rubric {report.judge.rubric_version}, "
             f"required: {', '.join(report.judge.required_criteria)}"
         )
+        lines.append(
+            f"pass bridge: every turn mean >= {report.judge.pass_threshold:g}/5, "
+            f"required criterion >= {report.judge.min_criterion_score}/5, mechanical blockers clear"
+        )
     lines.append(
         f"attempts: {report.attempts_judged} judged / {report.attempts_collected} collected / "
         f"{report.attempts_total} planned · scenarios: {report.scenarios_total}"
@@ -398,7 +402,7 @@ def format_report(report: CampaignReport, *, compact: bool = False) -> str:
 
     if report.taxonomy and not compact:
         lines.append("")
-        lines.append("failure taxonomy (attempts):")
+        lines.append("quality and point-loss tags (attempts):")
         for tag, count in list(report.taxonomy.items())[:12]:
             lines.append(f"  {tag:<28} {count}")
 
@@ -443,7 +447,7 @@ def format_scenario_table(report: CampaignReport, *, limit: int | None = None) -
     rows = sorted(report.scenarios, key=lambda s: (s.score if s.score is not None else 99, s.short))
     if limit:
         rows = rows[:limit]
-    lines = [f"{'scenario':<12} {'score':>6} {'ours':>6} {'official':>9}  stability    top failure tags"]
+    lines = [f"{'scenario':<12} {'score':>6} {'ours':>6} {'official':>9}  stability    top quality tags"]
     for row in rows:
         ours = f"{row.our_passes}/{row.judged_rounds}"
         official = f"{row.official_passes}/{row.rounds_total}"

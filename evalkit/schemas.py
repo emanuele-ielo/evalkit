@@ -72,6 +72,9 @@ class JudgeSettings(BaseModel):
     rubric_version: str
     required_criteria: list[str]
     pass_threshold: float = 4.0
+    # Historical verdicts that predate this field used the original floor of
+    # 3. New writers always persist the configured value explicitly (now 2),
+    # so keeping the fallback at 3 prevents old files changing meaning on read.
     min_criterion_score: int = 3
 
 

@@ -80,14 +80,20 @@ export function deriveLede(verdict: AttemptVerdict): Lede {
 
   // 2. Hedging on an answerable question — the judge tagged it and completeness fell.
   if (verdict.taxonomy.includes('hedging_without_answer') && weakest && weakest.score <= 3) {
-    return { tone: weakest.score <= 2 ? 'bad' : 'warn', kicker: 'hedged', headline: 'Hedged on a question the payload answers' }
+    return {
+      tone: verdict.passed ? 'warn' : weakest.score <= 2 ? 'bad' : 'warn',
+      kicker: 'hedged',
+      headline: 'Hedged on a question the payload answers',
+    }
   }
 
   // 3. Otherwise the weakest required criterion is the story.
   if (weakest && weakest.score < 4) {
     const known = CRITERION[weakest.name]
     return {
-      tone: weakest.score <= 2 ? 'bad' : 'warn',
+      // A weak criterion remains the headline, but a passing attempt is a
+      // warning rather than a red overall failure.
+      tone: verdict.passed ? 'warn' : weakest.score <= 2 ? 'bad' : 'warn',
       kicker: known?.kicker ?? weakest.name.replace(/_/g, ' '),
       headline: known ? (weakest.score <= 2 ? known.low : known.mid) : `${weakest.name} scored ${weakest.score}/5`,
     }

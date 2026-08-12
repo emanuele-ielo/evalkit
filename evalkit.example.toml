@@ -33,7 +33,9 @@ required = ["grounding", "completeness", "clauses", "customer_care"]
 # The score is the verdict; these only derive a binary read for comparing with
 # the platform's pass/fail judge.
 pass_threshold = 4.0
-min_criterion_score = 3
+# A 2/5 remains a visible weakness but is not an automatic FAIL. Only a 1/5
+# criterion, a turn mean below threshold, or a deterministic blocker fails.
+min_criterion_score = 2
 
 # ---------------------------------------------------------------------------
 # Agent profiles. `evalkit run --agent <name>` picks one of these.

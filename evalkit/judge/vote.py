@@ -96,7 +96,7 @@ def aggregate_turn(
     *,
     required: Iterable[str] = CRITERIA,
     pass_threshold: float = 4.0,
-    min_criterion_score: int = 3,
+    min_criterion_score: int = 2,
 ) -> TurnVerdict:
     required_set = set(required)
     usable = [vote for vote in votes if vote.verdict is not None]
@@ -128,6 +128,9 @@ def aggregate_turn(
         score = DETERMINISTIC_CAP
         capped_by = ", ".join(check.name for check in blocking)
 
+    # The per-criterion floor is only a catastrophic-defect guardrail. A 2/5
+    # remains visible as a serious weakness, but the turn mean decides the
+    # binary bridge; only a 1/5 can veto an otherwise passing average by default.
     weakest = min((o.score for o in required_outcomes), default=0.0)
     passed = bool(usable) and deterministic_passed and score >= pass_threshold and weakest >= min_criterion_score
 
@@ -227,3 +230,49 @@ def aggregate_attempt(
         duration_ms=duration_ms,
         errors=[error for turn in turns for error in turn.errors],
     )
+
+
+def reaggregate_verdict(
+    verdict: AttemptVerdict,
+    *,
+    required: Iterable[str] = CRITERIA,
+    pass_threshold: float = 4.0,
+    min_criterion_score: int = 2,
+) -> AttemptVerdict:
+    """Recompute scores/pass from stored votes and deterministic checks.
+
+    This changes no LLM judgement and consumes no tokens. It is the safe path
+    when only the binary aggregation policy changes.
+    """
+    required_list = list(required)
+    settings = verdict.judge.model_copy(
+        update={
+            "required_criteria": required_list,
+            "pass_threshold": pass_threshold,
+            "min_criterion_score": min_criterion_score,
+        }
+    )
+    turns = [
+        aggregate_turn(
+            turn.turn_index,
+            turn.votes,
+            turn.deterministic,
+            required=required_list,
+            pass_threshold=pass_threshold,
+            min_criterion_score=min_criterion_score,
+        )
+        for turn in verdict.turns
+    ]
+    updated = aggregate_attempt(
+        campaign=verdict.campaign,
+        scenario=verdict.scenario,
+        short=verdict.short,
+        round_=verdict.round,
+        result_id=verdict.result_id,
+        turns=turns,
+        judge=settings,
+        official_passed=verdict.official_passed,
+        duration_ms=verdict.duration_ms,
+    )
+    updated.judged_at = verdict.judged_at
+    return updated

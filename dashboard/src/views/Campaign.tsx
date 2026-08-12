@@ -214,7 +214,7 @@ export default function Campaign({ id }: { id: string }) {
           <span className="k">
             <MetricHint label="Pass — every round" align="left">
               {scored
-                ? `Scenarios scoring at least ${report.judge?.pass_threshold ?? 4}/5 in every judged round.`
+                ? `Scenarios whose every judged round passed its saved mean, criterion-floor and mechanical guardrails.`
                 : 'Scenarios the judge marked as passed in every judged round.'}
             </MetricHint>
           </span>

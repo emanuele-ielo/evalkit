@@ -58,10 +58,12 @@ class Config:
     llm: LLMConfig
     required_criteria: list[str]
     # A scored verdict still needs a binary read to compare with the platform
-    # judge: an attempt "passes" at mean >= pass_threshold with no criterion
-    # below min_criterion_score.
+    # judge: an attempt "passes" when every turn's mean is >= pass_threshold,
+    # unless a criterion is catastrophic (below min_criterion_score). The
+    # default floor of 2 means a serious 2/5 lowers the mean but is not an
+    # automatic veto; only 1/5 is.
     pass_threshold: float = 4.0
-    min_criterion_score: int = 3
+    min_criterion_score: int = 2
     agents: dict[str, AgentConfig] = field(default_factory=dict)
     source_files: list[Path] = field(default_factory=list)
 
@@ -139,7 +141,7 @@ def load_config(path: str | Path | None = None, *, data_dir: str | Path | None =
         llm=llm,
         required_criteria=list((raw.get("rubric") or {}).get("required", ["grounding", "completeness", "clauses", "customer_care"])),
         pass_threshold=float((raw.get("rubric") or {}).get("pass_threshold", 4.0)),
-        min_criterion_score=int((raw.get("rubric") or {}).get("min_criterion_score", 3)),
+        min_criterion_score=int((raw.get("rubric") or {}).get("min_criterion_score", 2)),
         agents=agents,
         source_files=sources,
     )

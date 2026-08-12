@@ -296,6 +296,8 @@ function VerdictPanel({ detail, focus, onFocus }: { detail: AttemptDetail; focus
 
   const lede = deriveLede(verdict)
   const turn = worstTurn(verdict)
+  const passThreshold = verdict.judge.pass_threshold
+  const criterionFloor = verdict.judge.min_criterion_score
   const vote = voteIndex === 'aggregate' ? null : turn?.votes.find((item) => item.index === voteIndex)?.verdict ?? null
   const official = detail.view.turns[0]?.official
 
@@ -345,7 +347,8 @@ function VerdictPanel({ detail, focus, onFocus }: { detail: AttemptDetail; focus
           label={<Pill tone={verdict.passed ? 'good' : 'bad'}>threshold {verdict.passed ? 'pass' : 'fail'}</Pill>}
           align="right"
         >
-          Whether the score and all required criteria met the rubric’s minimum passing values.
+          Every turn must average at least {passThreshold}/5, every required criterion must score at least {criterionFloor}/5,
+          and no blocking mechanical check may fail.
         </MetricHint>
       </div>
 
@@ -384,7 +387,7 @@ function VerdictPanel({ detail, focus, onFocus }: { detail: AttemptDetail; focus
                   align="left"
                 >
                   {criterion.required
-                    ? 'A required rubric dimension: a low score here can make the whole attempt fail.'
+                    ? `A required rubric dimension: it contributes to the turn mean and must score at least ${criterionFloor}/5 under this verdict's saved policy.`
                     : 'An advisory rubric dimension: it informs the score but does not block a pass by itself.'}
                 </MetricHint>
               </span>

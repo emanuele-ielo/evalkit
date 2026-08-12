@@ -4,6 +4,7 @@
     evalkit import <source> --label …           cached eval results → a campaign
     evalkit run --agent vera --rounds 3         run scenarios live (the only writing command)
     evalkit judge <campaign>                    grade (or re-grade) with our rubric
+    evalkit reaggregate <campaign>              recompute pass from stored votes, no LLM calls
     evalkit report <campaign> [--vs other]      the numbers, and the diff between runs
     evalkit serve                               local dashboard
 """
@@ -29,7 +30,7 @@ from .report import (
     format_scenario_table,
 )
 from .runner import build_manifest, mint_snapshot, model_at_commit, resolve_scenarios, run_campaign
-from .store import DataRoot
+from .store import DataRoot, utcnow
 from .wful import WfulClient, WfulError, WfulNotAllowed
 
 
@@ -311,6 +312,105 @@ def cmd_judge(args: argparse.Namespace, config: Config) -> int:
     return 0
 
 
+def cmd_reaggregate(args: argparse.Namespace, config: Config) -> int:
+    """Apply the current score/pass policy to existing structured votes."""
+    from .judge.vote import reaggregate_verdict
+
+    root = DataRoot(config.data_dir)
+    if not root.exists(args.campaign):
+        print(f"unknown campaign {args.campaign}", file=sys.stderr)
+        return 1
+    store = root.campaign(args.campaign)
+    manifest = store.load()
+    candidates = []
+    skipped = 0
+    incompatible = 0
+    for ref in manifest.attempts:
+        verdict = store.read_verdict(ref.scenario, ref.round)
+        if verdict is None:
+            if store.read_legacy_verdict(ref.scenario, ref.round) is not None:
+                incompatible += 1
+            else:
+                skipped += 1
+            continue
+        if verdict.rubric_version != RUBRIC_VERSION:
+            incompatible += 1
+            continue
+        candidates.append((ref, verdict))
+
+    # One campaign must describe one aggregation policy. Abort before writing
+    # if any existing verdict cannot be converted campaign-wide.
+    if incompatible:
+        print(
+            f"cannot reaggregate campaign-wide: {incompatible} verdict(s) use a different rubric; "
+            "re-judge that campaign instead",
+            file=sys.stderr,
+        )
+        return 1
+    if not candidates:
+        print("no current-rubric verdicts to reaggregate", file=sys.stderr)
+        return 1
+
+    # Validate and compute every replacement before the first disk write. This
+    # avoids leaving a campaign half-converted if a stored v4 verdict is
+    # malformed or otherwise cannot be reaggregated.
+    updates = []
+    for ref, verdict in candidates:
+        try:
+            updated = reaggregate_verdict(
+                verdict,
+                required=config.required_criteria,
+                pass_threshold=config.pass_threshold,
+                min_criterion_score=config.min_criterion_score,
+            )
+        except Exception as exc:
+            print(
+                f"cannot reaggregate campaign-wide: {ref.key} is incompatible ({type(exc).__name__}: {exc})",
+                file=sys.stderr,
+            )
+            return 1
+        updates.append((ref, verdict, updated))
+
+    changed = 0
+    pass_flips = 0
+    latest_settings = None
+    for ref, verdict, updated in updates:
+        store.write_verdict(updated)
+        if verdict.passed != updated.passed:
+            pass_flips += 1
+        ref.our_passed = updated.passed
+        ref.our_score = updated.score
+        ref.status = "judged"
+        ref.error = None if not updated.errors else "; ".join(updated.errors[:2])
+        ref.updated_at = utcnow()
+        latest_settings = updated.judge
+        changed += 1
+
+    if latest_settings is not None:
+        manifest.judge = latest_settings
+    store.save(manifest)
+    store.append_event(
+        {
+            "type": "campaign_reaggregated",
+            "changed": changed,
+            "skipped": skipped,
+            "incompatible": incompatible,
+            "pass_flips": pass_flips,
+            "pass_threshold": config.pass_threshold,
+            "min_criterion_score": config.min_criterion_score,
+        }
+    )
+    report = build_report(store, manifest)
+    store.write_report(report)
+    print(
+        f"reaggregated {changed} attempt(s) with mean >= {config.pass_threshold:g} "
+        f"and criterion floor {config.min_criterion_score}/5; {pass_flips} pass flip(s), {skipped} unjudged skipped"
+    )
+    print()
+    print(format_report(report))
+    return 0
+
+
 async def judge_campaign_entry(store, manifest, config, **kwargs) -> dict[str, Any]:
     from .judge.runner import judge_campaign
 
@@ -437,6 +537,13 @@ def build_parser() -> argparse.ArgumentParser:
     judge.add_argument("--rps", type=float, help="judge requests per second ceiling (0 disables)")
     judge.add_argument("--force", action="store_true", help="re-judge attempts that already have a verdict")
     judge.set_defaults(func=cmd_judge)
+
+    reaggregate = subparsers.add_parser(
+        "reaggregate",
+        help="recompute score/pass campaign-wide from stored votes, without calling an LLM",
+    )
+    reaggregate.add_argument("campaign")
+    reaggregate.set_defaults(func=cmd_reaggregate)
 
     report = subparsers.add_parser("report", help="print a campaign's numbers")
     report.add_argument("campaign")

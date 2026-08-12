@@ -12,6 +12,7 @@ cp evalkit.example.toml evalkit.toml    # then point it at your agent
 .venv/bin/python -m evalkit.cli import <dir> --agent vera   # cached results → campaign
 .venv/bin/python -m evalkit.cli run --agent vera --rounds 3 # live campaign
 .venv/bin/python -m evalkit.cli judge <campaign>            # grade with our rubric
+.venv/bin/python -m evalkit.cli reaggregate <campaign>      # recompute pass from stored votes, no LLM calls
 .venv/bin/python -m evalkit.cli report <campaign> --vs <other>
 .venv/bin/python -m evalkit.cli serve                       # dashboard on :4747
 cd dashboard && pnpm install && pnpm build                  # build the UI
@@ -26,3 +27,8 @@ and the open threads. Design notes live at the top of each module.
 passed explicitly on every platform command so a run cannot land in the wrong
 tenant. The platform is read-only except `eval run`, enforced by an allowlist in
 `evalkit/wful.py`.
+
+The binary pass is only a bridge for comparisons: by default every turn must
+average at least 4/5, with no blocking deterministic failure and no catastrophic
+1/5 criterion. A 2/5 is still highlighted and lowers the mean, but does not veto
+an otherwise strong answer.

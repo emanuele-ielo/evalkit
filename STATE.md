@@ -15,6 +15,8 @@ storia degli esperimenti già eseguiti.
   dai tool; prompt e rubrica vietano fonti, versioni, documenti, KB e formule generiche di conferma TIM.
 - La rubrica **v4** misura grounding, risoluzione/completezza, condizioni decisionali e tono customer care.
   I payload e i gold storici vengono proiettati senza LOB/provenienza; i verdict v2/v3 restano leggibili.
+- Il bridge binario non applica più un veto a un singolo criterio da 2/5: passa con media almeno 4/5,
+  nessun blocco deterministico e nessun criterio catastrofico da 1/5. Il 2/5 resta visibile nel report.
 - Le richieste senza uno slot che cambia materialmente la risposta devono produrre **una domanda breve,
   senza tool**. La ricerca parte al turno successivo usando intento + oggetto + vincoli espliciti.
 - Nuovo batch iniziale `v4_customer_care`: `g057` (canale scritto → chiarire lo scopo → reclamo) e `g032`
@@ -110,7 +112,8 @@ Il server è su **http://127.0.0.1:4747** e resta su tra le sessioni (processo d
 ## 3. Rubrica v3 — voti 1-5 (commit evalkit `7c6f648`)
 
 Quattro criteri, mediana di 3 voti ciascuno, voto attempt = media dei quattro; i check
-meccanici bloccanti **cappano a 2**. `passed` = ≥4 e nessun criterio <3.
+meccanici bloccanti **cappano a 2**. In v3 il bridge era `passed` = ≥4 e nessun
+criterio <3; la policy corrente v4, descritta sopra, ha abbassato quel floor a 2.
 
 - **grounding** (invariato): le affermazioni stanno nel payload.
 - **completeness**: ora **proporzionale** — FULL=1, PARTIAL=0,5 sui fatti non-meta;

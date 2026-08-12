@@ -1,9 +1,9 @@
 """Judge orchestration: views on disk → verdicts on disk.
 
-Re-runnable by design. `evalkit judge <campaign>` skips attempts that already
-carry a verdict from the current rubric version, so re-judging a campaign with a
-new rubric is one command and costs only the attempts it actually re-grades —
-the Fase 5e re-judge experiment, as a first-class operation.
+Re-runnable by design. `evalkit judge <campaign>` skips attempts only when their
+rubric, vote panel and aggregation settings match the requested run. A pure
+aggregation-policy change should use `evalkit reaggregate <campaign>` instead:
+it consumes the saved structured votes and makes no LLM calls.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import asyncio
 import time
 from typing import Callable, Iterable, Sequence
 
-from ..config import Config, load_llm_credentials
+from ..config import Config, ConfigError, load_llm_credentials
 from ..deterministic import check_turn
 from ..normalize import normalize_attempt
 from ..schemas import (
@@ -57,7 +57,7 @@ async def judge_attempt(
     llm_semaphore: asyncio.Semaphore | None = None,
     include_author_notes: bool = True,
     pass_threshold: float = 4.0,
-    min_criterion_score: int = 3,
+    min_criterion_score: int = 2,
 ) -> AttemptVerdict:
     """Grade every turn of one attempt with `votes` independent votes."""
     settings = JudgeSettings(
@@ -137,17 +137,6 @@ async def judge_campaign(
     """Judge (or re-judge) a campaign's attempts. Returns a small summary."""
     votes = votes or config.llm.votes
     model = model or config.llm.model
-    credentials = load_llm_credentials(config.llm, model)
-    llm = JudgeLLM(
-        credentials=credentials,
-        model=model,
-        reasoning_effort=config.llm.reasoning_effort,
-        max_retries=config.llm.max_retries,
-        requests_per_second=config.llm.requests_per_second,
-        max_output_tokens=config.llm.max_output_tokens,
-    )
-    llm_semaphore = asyncio.Semaphore(max(1, config.llm.concurrency))
-
     wanted = [
         ref
         for ref in manifest.attempts
@@ -157,16 +146,56 @@ async def judge_campaign(
 
     todo: list[AttemptRef] = []
     skipped = 0
+    policy_mismatches: list[AttemptRef] = []
     for ref in wanted:
         if not store.attempt_paths(ref.scenario, ref.round).exists():
             continue
         existing = store.read_verdict(ref.scenario, ref.round)
-        if existing and not force and existing.rubric_version == RUBRIC_VERSION and existing.judge.votes >= votes:
-            skipped += 1
+        policy_matches = bool(
+            existing
+            and existing.judge.required_criteria == list(config.required_criteria)
+            and existing.judge.pass_threshold == config.pass_threshold
+            and existing.judge.min_criterion_score == config.min_criterion_score
+        )
+        reusable_panel = bool(
+            existing
+            and not force
+            and existing.rubric_version == RUBRIC_VERSION
+            and existing.judge.model == model
+            and existing.judge.votes >= votes
+            and existing.judge.reasoning_effort == config.llm.reasoning_effort
+        )
+        if reusable_panel:
+            if policy_matches:
+                skipped += 1
+            else:
+                policy_mismatches.append(ref)
             continue
         todo.append(ref)
+    if policy_mismatches:
+        examples = ", ".join(ref.key for ref in policy_mismatches[:3])
+        raise ConfigError(
+            f"{len(policy_mismatches)} existing verdict(s) have reusable votes but a different pass policy "
+            f"({examples}); run `evalkit reaggregate {manifest.id}` first to update them without LLM calls"
+        )
     if limit is not None:
         todo = todo[:limit]
+
+    # A fully skipped campaign (or a policy mismatch above) must not require
+    # credentials. Construct the judge only when fresh votes are truly needed.
+    llm = None
+    llm_semaphore = None
+    if todo:
+        credentials = load_llm_credentials(config.llm, model)
+        llm = JudgeLLM(
+            credentials=credentials,
+            model=model,
+            reasoning_effort=config.llm.reasoning_effort,
+            max_retries=config.llm.max_retries,
+            requests_per_second=config.llm.requests_per_second,
+            max_output_tokens=config.llm.max_output_tokens,
+        )
+        llm_semaphore = asyncio.Semaphore(max(1, config.llm.concurrency))
 
     settings = JudgeSettings(
         model=model,
@@ -195,7 +224,7 @@ async def judge_campaign(
                 "event": "judge_started",
                 "attempts": len(todo),
                 "skipped": skipped,
-                "judge": llm.describe(),
+                "judge": llm.describe() if llm is not None else f"{model} (no new votes)",
                 "votes": votes,
             }
         )
@@ -204,6 +233,7 @@ async def judge_campaign(
     state = {"done": 0, "passed": 0, "failed": 0, "errors": 0}
 
     async def work(ref: AttemptRef) -> AttemptVerdict | None:
+        assert llm is not None
         view = load_view(store, ref, manifest.id)
         if view is None:
             return None
@@ -270,7 +300,7 @@ async def judge_campaign(
         "with_errors": state["errors"],
         "skipped": skipped,
         "crashed": len(failures),
-        "judge": llm.describe(),
+        "judge": llm.describe() if llm is not None else f"{model} (no new votes)",
         "votes": votes,
         "rubric_version": RUBRIC_VERSION,
         "tokens": tokens.model_dump() if tokens else None,
