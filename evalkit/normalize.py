@@ -222,6 +222,203 @@ def _prepend_missing_startup_calls(
     return calls, [*startup_messages, *shifted]
 
 
+def _activity_turn_calls(
+    activity: Any,
+    turn_results: list[dict[str, Any]],
+    scenario_turns: list[dict[str, Any]],
+) -> list[list[ToolCallView]]:
+    """Recover durable tool calls inside exact customer→agent turn windows.
+
+    The eval result can omit an earlier retry when two calls have identical
+    fingerprints. Activity transcriptions retain both calls with unique ids and
+    a durable sequence. We import only calls bounded by the exact customer and
+    final-agent texts for a collected turn; ambiguous evidence is ignored.
+    """
+    empty = [[] for _ in turn_results]
+    if not isinstance(activity, dict):
+        return empty
+    raw = activity.get("transcriptions")
+    if not isinstance(raw, list):
+        return empty
+
+    sequenced: list[tuple[int, dict[str, Any]]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            sequence = int(item.get("sequence"))
+        except (TypeError, ValueError):
+            continue
+        sequenced.append((sequence, item))
+    sequenced.sort(key=lambda pair: pair[0])
+
+    def clean_text(value: Any) -> str:
+        return str(value or "").strip()
+
+    cursor = 0
+    recovered: list[list[ToolCallView]] = []
+    for turn_index, turn_result in enumerate(turn_results):
+        scenario_turn = scenario_turns[turn_index] if turn_index < len(scenario_turns) else {}
+        evaluation_turn = turn_result.get("evaluation_turn") or {}
+        user_text = clean_text(evaluation_turn.get("user_message") or scenario_turn.get("user_message"))
+        responses = (turn_result.get("turn_state") or {}).get("agent_responses") or []
+        final_agent_texts = [
+            clean_text(response.get("text"))
+            for response in responses
+            if isinstance(response, dict)
+            and not response.get("tool_details")
+            and str(response.get("speaker") or "agent").lower() == "agent"
+            and clean_text(response.get("text"))
+        ]
+        agent_text = final_agent_texts[-1] if final_agent_texts else ""
+        if not user_text or not agent_text:
+            recovered.append([])
+            continue
+
+        start = next(
+            (
+                index
+                for index in range(cursor, len(sequenced))
+                if str(sequenced[index][1].get("speaker") or "").lower() == "customer"
+                and clean_text(sequenced[index][1].get("text")) == user_text
+            ),
+            None,
+        )
+        if start is None:
+            recovered.append([])
+            continue
+        next_customer = next(
+            (
+                index
+                for index in range(start + 1, len(sequenced))
+                if str(sequenced[index][1].get("speaker") or "").lower() == "customer"
+            ),
+            len(sequenced),
+        )
+        end = next(
+            (
+                index
+                for index in range(start + 1, next_customer)
+                if str(sequenced[index][1].get("speaker") or "").lower() == "agent"
+                and clean_text(sequenced[index][1].get("text")) == agent_text
+            ),
+            None,
+        )
+        if end is None:
+            recovered.append([])
+            continue
+
+        calls: list[ToolCallView] = []
+        seen_call_ids: set[str] = set()
+        for _, transcription in sequenced[start + 1 : end]:
+            details = transcription.get("tool_details")
+            if not isinstance(details, dict) or not details:
+                continue
+            call_id = (
+                details.get("call_id")
+                or details.get("internal_id")
+                or transcription.get("internal_id")
+            )
+            if not call_id:
+                continue
+            normalized_call_id = str(call_id)
+            if normalized_call_id in seen_call_ids:
+                continue
+            seen_call_ids.add(normalized_call_id)
+            complete_details = dict(details)
+            complete_details["call_id"] = normalized_call_id
+            call = _tool_call_view(len(calls), complete_details)
+            if call.is_trigger:
+                continue
+            calls.append(call)
+        recovered.append(calls)
+        cursor = end + 1
+    return recovered
+
+
+def _merge_activity_turn_calls(
+    visible: list[ToolCallView],
+    messages: list[MessageView],
+    recovered: list[ToolCallView],
+) -> tuple[list[ToolCallView], list[MessageView], int]:
+    """Merge activity order with result-authoritative payloads by unique call id."""
+    if not recovered:
+        return visible, messages, 0
+
+    # Startup lifecycle calls live outside the customer→agent business window
+    # and are reconciled separately by `_prepend_missing_startup_calls`.
+    lifecycle = [call for call in visible if call.is_trigger]
+    window_visible = [call for call in visible if not call.is_trigger]
+
+    # Without durable ids on both sides we cannot distinguish a retry from a
+    # duplicate persistence record. Likewise, a result-only business id means
+    # the exact activity window was incomplete. In either case retain result.
+    if any(not call.call_id for call in window_visible):
+        return visible, messages, 0
+    recovered_ids = {str(call.call_id) for call in recovered if call.call_id}
+    if any(str(call.call_id) not in recovered_ids for call in window_visible):
+        return visible, messages, 0
+
+    visible_by_id = {call.call_id: call for call in window_visible if call.call_id}
+    consumed: set[str] = set()
+    merged: list[ToolCallView] = []
+    imported = 0
+    for activity_call in recovered:
+        result_call = visible_by_id.get(activity_call.call_id)
+        if result_call is not None:
+            merged.append(result_call)
+            consumed.add(str(activity_call.call_id))
+        else:
+            merged.append(activity_call)
+            imported += 1
+    merged.extend(
+        call
+        for call in window_visible
+        if not call.call_id or str(call.call_id) not in consumed
+    )
+    if imported == 0:
+        return visible, messages, 0
+    merged = [*lifecycle, *merged]
+    merged = [call.model_copy(update={"index": index}) for index, call in enumerate(merged)]
+
+    timestamp_by_call_id: dict[str, str | None] = {}
+    for message in messages:
+        if message.role != "tool" or message.tool_index is None:
+            continue
+        if 0 <= message.tool_index < len(visible):
+            visible_call = visible[message.tool_index]
+            if visible_call.call_id:
+                timestamp_by_call_id[str(visible_call.call_id)] = message.timestamp
+    first_tool_position = next(
+        (index for index, message in enumerate(messages) if message.role == "tool"),
+        next(
+            (index for index, message in enumerate(messages) if message.role == "agent"),
+            len(messages),
+        ),
+    )
+    non_tool_before = sum(
+        1 for message in messages[:first_tool_position] if message.role != "tool"
+    )
+    non_tool = [message for message in messages if message.role != "tool"]
+    rebuilt: list[MessageView] = [*non_tool[:non_tool_before]]
+    rebuilt.extend(
+        MessageView(
+            index=0,
+            role="tool",
+            tool_index=index,
+            timestamp=(
+                timestamp_by_call_id.get(str(call.call_id))
+                if call.call_id
+                else None
+            ),
+        )
+        for index, call in enumerate(merged)
+    )
+    rebuilt.extend(non_tool[non_tool_before:])
+    rebuilt = [message.model_copy(update={"index": index}) for index, message in enumerate(rebuilt)]
+    return merged, rebuilt, imported
+
+
 def _official_view(turn_state: dict[str, Any], failure_reason: str | None) -> OfficialJudgeView | None:
     evaluations = turn_state.get("llm_judge_evaluation_results") or []
     if not evaluations:
@@ -486,11 +683,13 @@ def normalize_attempt(
     parsed_trace = _parse_trace(trace)
     system_prompt = parsed_trace["system_prompt"]
     startup_calls = _startup_calls(activity, parsed_trace)
+    result_turns = list(result.get("turn_results") or [])
+    activity_calls_by_turn = _activity_turn_calls(activity, result_turns, scenario_turns)
 
     turns: list[TurnView] = []
     llm_calls: list[LLMCallView] = list(parsed_trace["llm_calls"])
 
-    for turn_index, turn_result in enumerate(result.get("turn_results") or []):
+    for turn_index, turn_result in enumerate(result_turns):
         turn_state = turn_result.get("turn_state") or {}
         responses = turn_state.get("agent_responses") or []
         scenario_turn = scenario_turns[turn_index] if turn_index < len(scenario_turns) else {}
@@ -533,6 +732,21 @@ def normalize_attempt(
                     timestamp=response.get("timestamp"),
                 )
                 )
+
+        recovered_turn_calls = (
+            activity_calls_by_turn[turn_index]
+            if turn_index < len(activity_calls_by_turn)
+            else []
+        )
+        tool_calls, messages, imported_calls = _merge_activity_turn_calls(
+            tool_calls,
+            messages,
+            recovered_turn_calls,
+        )
+        if imported_calls:
+            warnings.append(
+                f"turn {turn_index + 1}: recovered {imported_calls} tool call(s) omitted by the eval result from durable activity evidence"
+            )
 
         if turn_index == 0:
             tool_calls, messages = _prepend_missing_startup_calls(

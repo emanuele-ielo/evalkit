@@ -201,7 +201,7 @@ class ToolContractsTest(unittest.TestCase):
         self.assertFalse(check.passed)
         self.assertTrue(check.blocking)
 
-    def test_activity_imports_only_startup_triggers_not_business_calls(self) -> None:
+    def test_unbounded_activity_business_copy_does_not_override_visible_result(self) -> None:
         result = self.startup_result()
         result["turn_results"][0]["turn_state"]["agent_responses"].insert(
             0,
@@ -249,6 +249,433 @@ class ToolContractsTest(unittest.TestCase):
             ["resolve_customer_context", "search_vera"],
         )
         self.assertEqual(view.turns[0].tool_calls[1].output, {"answer": "result copy"})
+
+    def test_recovers_distinct_business_retry_and_keeps_result_payload_authoritative(self) -> None:
+        result = {
+            "scenario_definition": {
+                "name": "business-retry",
+                "instructions": {
+                    "turns": [
+                        {
+                            "user_message": "Q1",
+                            "tools_allowed": ["search_vera"],
+                            "metadata": {
+                                "evalkit_v5": {
+                                    "required_tools": ["search_vera"],
+                                    "tool_cardinality": {"search_vera": {"min": 1, "max": 1}},
+                                }
+                            },
+                        }
+                    ]
+                },
+            },
+            "turn_results": [
+                {
+                    "evaluation_turn": {"user_message": "Q1"},
+                    "turn_state": {
+                        "agent_responses": [
+                            {
+                                "tool_details": {
+                                    "function_name": "search_vera",
+                                    "params": {"query": "same"},
+                                    "output": {"source": "result"},
+                                    "call_id": "call-visible",
+                                }
+                            },
+                            {"speaker": "agent", "text": "A1"},
+                        ]
+                    },
+                }
+            ],
+        }
+        activity = {
+            "transcriptions": [
+                {"sequence": 40, "speaker": "agent", "text": "A1"},
+                {
+                    "sequence": 20,
+                    "speaker": "system",
+                    "internal_id": "call-missing",
+                    "tool_details": {
+                        "function_name": "search_vera",
+                        "params": {"query": "same"},
+                        "output": {"source": "first"},
+                    },
+                },
+                {"sequence": 10, "speaker": "customer", "text": "Q1"},
+                {
+                    "sequence": 30,
+                    "speaker": "system",
+                    "internal_id": "call-visible",
+                    "tool_details": {
+                        "function_name": "search_vera",
+                        "params": {"query": "same"},
+                        "output": {"source": "activity-copy"},
+                    },
+                },
+                {
+                    "sequence": 35,
+                    "speaker": "system",
+                    "internal_id": "call-visible",
+                    "tool_details": {
+                        "function_name": "search_vera",
+                        "params": {"query": "same"},
+                        "output": {"source": "duplicate-activity-record"},
+                    },
+                },
+            ]
+        }
+
+        view = normalize_attempt(
+            campaign="test",
+            scenario="business-retry",
+            short="business-retry",
+            round_=1,
+            result=result,
+            activity=activity,
+        )
+
+        calls = view.turns[0].tool_calls
+        self.assertEqual([item.call_id for item in calls], ["call-missing", "call-visible"])
+        self.assertEqual([item.index for item in calls], [0, 1])
+        self.assertEqual(calls[1].output, {"source": "result"})
+        self.assertEqual(
+            [message.tool_index for message in view.turns[0].messages if message.role == "tool"],
+            [0, 1],
+        )
+        checks = by_name(check_turn(view.turns[0]))
+        self.assertFalse(checks["tool_cardinality"].passed)
+        self.assertIn("recovered 1 tool call", " ".join(view.warnings))
+
+    def test_recovered_business_calls_stay_inside_exact_activity_turn_windows(self) -> None:
+        result = {
+            "scenario_definition": {
+                "name": "two-turn-windows",
+                "instructions": {
+                    "turns": [
+                        {"user_message": "Q1"},
+                        {"user_message": "Q2"},
+                    ]
+                },
+            },
+            "turn_results": [
+                {
+                    "evaluation_turn": {"user_message": "Q1"},
+                    "turn_state": {"agent_responses": [{"speaker": "agent", "text": "A1"}]},
+                },
+                {
+                    "evaluation_turn": {"user_message": "Q2"},
+                    "turn_state": {"agent_responses": [{"speaker": "agent", "text": "A2"}]},
+                },
+            ],
+        }
+        activity = {
+            "transcriptions": [
+                {"sequence": 5, "speaker": "system", "internal_id": "call-pre", "tool_details": {"function_name": "pre", "output": {}}},
+                {"sequence": 10, "speaker": "customer", "text": "Q1"},
+                {"sequence": 20, "speaker": "system", "internal_id": "call-t0", "tool_details": {"function_name": "lookup_first", "output": {}}},
+                {"sequence": 30, "speaker": "agent", "text": "A1"},
+                {"sequence": 35, "speaker": "system", "internal_id": "call-late", "tool_details": {"function_name": "late", "output": {}}},
+                {"sequence": 40, "speaker": "customer", "text": "Q2"},
+                {"sequence": 50, "speaker": "system", "internal_id": "call-t1", "tool_details": {"function_name": "lookup_second", "output": {}}},
+                {"sequence": 60, "speaker": "agent", "text": "A2"},
+                {"sequence": 70, "speaker": "system", "internal_id": "call-future", "tool_details": {"function_name": "future", "output": {}}},
+            ]
+        }
+
+        view = normalize_attempt(
+            campaign="test",
+            scenario="two-turn-windows",
+            short="two-turn-windows",
+            round_=1,
+            result=result,
+            activity=activity,
+        )
+
+        self.assertEqual(
+            [[call.call_id for call in item.tool_calls] for item in view.turns],
+            [["call-t0"], ["call-t1"]],
+        )
+        self.assertEqual(
+            [[message.role for message in item.messages] for item in view.turns],
+            [["user", "tool", "agent"], ["user", "tool", "agent"]],
+        )
+
+    def test_activity_recovery_ignores_unsequenced_unidentified_and_unreconciled_calls(self) -> None:
+        result = {
+            "scenario_definition": {
+                "name": "ambiguous-activity",
+                "instructions": {"turns": [{"user_message": "Q1"}]},
+            },
+            "turn_results": [
+                {
+                    "evaluation_turn": {"user_message": "Q1"},
+                    "turn_state": {
+                        "agent_responses": [
+                            {
+                                "tool_details": {
+                                    "function_name": "visible_only",
+                                    "call_id": "call-result-only",
+                                    "output": {"source": "result"},
+                                }
+                            },
+                            {"speaker": "agent", "text": "A1"},
+                        ]
+                    },
+                }
+            ],
+        }
+        activity = {
+            "transcriptions": [
+                {"sequence": 10, "speaker": "customer", "text": "Q1"},
+                {
+                    "speaker": "system",
+                    "internal_id": "call-no-sequence",
+                    "tool_details": {"function_name": "ignored_no_sequence", "output": {}},
+                },
+                {
+                    "sequence": 20,
+                    "speaker": "system",
+                    "tool_details": {"function_name": "ignored_no_id", "output": {}},
+                },
+                {
+                    "sequence": 25,
+                    "speaker": "system",
+                    "internal_id": "call-activity-only",
+                    "tool_details": {"function_name": "activity_only", "output": {}},
+                },
+                {"sequence": 30, "speaker": "agent", "text": "A1"},
+            ]
+        }
+
+        view = normalize_attempt(
+            campaign="test",
+            scenario="ambiguous-activity",
+            short="ambiguous-activity",
+            round_=1,
+            result=result,
+            activity=activity,
+        )
+
+        self.assertEqual(
+            [(call.call_id, call.name) for call in view.turns[0].tool_calls],
+            [("call-result-only", "visible_only")],
+        )
+        self.assertNotIn("recovered", " ".join(view.warnings))
+
+    def test_activity_recovery_ignores_unsequenced_or_unidentified_evidence(self) -> None:
+        result = {
+            "scenario_definition": {
+                "name": "insufficient-activity-evidence",
+                "instructions": {"turns": [{"user_message": "Q1"}]},
+            },
+            "turn_results": [
+                {
+                    "evaluation_turn": {"user_message": "Q1"},
+                    "turn_state": {"agent_responses": [{"speaker": "agent", "text": "A1"}]},
+                }
+            ],
+        }
+        activity = {
+            "transcriptions": [
+                {"sequence": 10, "speaker": "customer", "text": "Q1"},
+                {
+                    "speaker": "system",
+                    "internal_id": "call-no-sequence",
+                    "tool_details": {"function_name": "ignored_no_sequence", "output": {}},
+                },
+                {
+                    "sequence": 20,
+                    "speaker": "system",
+                    "tool_details": {"function_name": "ignored_no_id", "output": {}},
+                },
+                {"sequence": 30, "speaker": "agent", "text": "A1"},
+            ]
+        }
+
+        view = normalize_attempt(
+            campaign="test",
+            scenario="insufficient-activity-evidence",
+            short="insufficient-activity-evidence",
+            round_=1,
+            result=result,
+            activity=activity,
+        )
+
+        self.assertEqual(view.turns[0].tool_calls, [])
+        self.assertNotIn("recovered", " ".join(view.warnings))
+
+    def test_recovered_business_call_participates_in_contract_and_mock_checks(self) -> None:
+        mock = {
+            "enabled": True,
+            "tool_name": "search_vera",
+            "expected_input": {"query": "PUK"},
+            "mock_output": {"found": 1},
+        }
+        result = {
+            "scenario_definition": {
+                "name": "recovered-contract-call",
+                "instructions": {
+                    "turns": [
+                        {
+                            "user_message": "Q1",
+                            "tools_allowed": ["search_vera"],
+                            "tool_mocks": [mock],
+                            "metadata": {
+                                "evalkit_v5": {
+                                    "required_tools": ["search_vera"],
+                                    "tool_cardinality": {
+                                        "search_vera": {"min": 1, "max": 1}
+                                    },
+                                }
+                            },
+                        }
+                    ]
+                },
+            },
+            "turn_results": [
+                {
+                    "evaluation_turn": {"user_message": "Q1"},
+                    "turn_state": {"agent_responses": [{"speaker": "agent", "text": "A1"}]},
+                }
+            ],
+        }
+        activity = {
+            "transcriptions": [
+                {"sequence": 10, "speaker": "customer", "text": "Q1"},
+                {
+                    "sequence": 20,
+                    "speaker": "system",
+                    "internal_id": "call-recovered",
+                    "tool_details": {
+                        "function_name": "search_vera",
+                        "params": {"query": "PUK"},
+                        "output": {"Response": {"result": {"found": 1}}},
+                    },
+                },
+                {"sequence": 30, "speaker": "agent", "text": "A1"},
+            ]
+        }
+
+        view = normalize_attempt(
+            campaign="test",
+            scenario="recovered-contract-call",
+            short="recovered-contract-call",
+            round_=1,
+            result=result,
+            activity=activity,
+        )
+
+        recovered = view.turns[0].tool_calls[0]
+        self.assertEqual(recovered.call_id, "call-recovered")
+        self.assertEqual(recovered.declared_mock_index, 0)
+        self.assertTrue(recovered.matches_mock_input)
+        self.assertTrue(recovered.matches_mock)
+        checks = by_name(check_turn(view.turns[0]))
+        self.assertTrue(checks["required_tools"].passed)
+        self.assertTrue(checks["tool_cardinality"].passed)
+        self.assertTrue(checks["declared_mocks_called"].passed)
+
+    def test_visible_startup_trigger_does_not_block_business_recovery(self) -> None:
+        result = self.startup_result()
+        result["scenario_definition"]["instructions"]["turns"][0].update(
+            {
+                "tools_allowed": ["search_vera"],
+                "metadata": {
+                    "evalkit_v5": {
+                        "required_tools": ["search_vera"],
+                        "tool_cardinality": {"search_vera": {"min": 1, "max": 1}},
+                    }
+                },
+            }
+        )
+        result["turn_results"][0]["turn_state"]["agent_responses"].insert(
+            0,
+            {
+                "speaker": "system",
+                "tool_details": {
+                    "function_name": "resolve_customer_context",
+                    "params": {},
+                    "output": {"success": True, "segment": "interforze"},
+                    "call_source": "trigger",
+                    "trigger_type": "on_start",
+                    "call_id": "call-trigger",
+                },
+            },
+        )
+        result["turn_results"][0]["turn_state"]["agent_responses"].insert(
+            1,
+            {
+                "speaker": "system",
+                "timestamp": "visible-timestamp",
+                "tool_details": {
+                    "function_name": "search_vera",
+                    "params": {"query": "same"},
+                    "output": {"source": "result"},
+                    "call_id": "call-visible",
+                },
+            },
+        )
+        activity = {
+            "transcriptions": [
+                {
+                    "sequence": 5,
+                    "speaker": "system",
+                    "internal_id": "call-trigger",
+                    "tool_details": {
+                        "function_name": "resolve_customer_context",
+                        "params": {},
+                        "output": {"success": True, "segment": "interforze"},
+                        "call_source": "trigger",
+                        "trigger_type": "on_start",
+                    },
+                },
+                {"sequence": 10, "speaker": "customer", "text": "Domanda incompleta"},
+                {
+                    "sequence": 20,
+                    "speaker": "system",
+                    "internal_id": "call-missing",
+                    "tool_details": {
+                        "function_name": "search_vera",
+                        "params": {"query": "same"},
+                        "output": {"source": "first"},
+                    },
+                },
+                {
+                    "sequence": 30,
+                    "speaker": "system",
+                    "internal_id": "call-visible",
+                    "tool_details": {
+                        "function_name": "search_vera",
+                        "params": {"query": "same"},
+                        "output": {"source": "activity-copy"},
+                    },
+                },
+                {"sequence": 40, "speaker": "agent", "text": "Quale dettaglio ti serve?"},
+            ]
+        }
+
+        view = normalize_attempt(
+            campaign="test",
+            scenario="startup-with-retry",
+            short="startup-with-retry",
+            round_=1,
+            result=result,
+            activity=activity,
+        )
+
+        self.assertEqual(
+            [(call.call_id, call.name) for call in view.turns[0].tool_calls],
+            [
+                ("call-trigger", "resolve_customer_context"),
+                ("call-missing", "search_vera"),
+                ("call-visible", "search_vera"),
+            ],
+        )
+        self.assertEqual(
+            [message.timestamp for message in view.turns[0].messages if message.role == "tool"],
+            [None, None, "visible-timestamp"],
+        )
+        self.assertFalse(by_name(check_turn(view.turns[0]))["tool_cardinality"].passed)
 
     def test_judge_prompt_excludes_trigger_payload_but_keeps_business_payload(self) -> None:
         result = self.startup_result()
