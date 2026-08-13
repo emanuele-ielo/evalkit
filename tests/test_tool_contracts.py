@@ -201,6 +201,109 @@ class ToolContractsTest(unittest.TestCase):
         self.assertFalse(check.passed)
         self.assertTrue(check.blocking)
 
+    def test_start_mock_does_not_imply_a_business_tool_on_fallback(self) -> None:
+        result = self.startup_result()
+        result["scenario_definition"]["instructions"]["turns"][0]["metadata"]["evalkit_v5"] = {
+            "response_mode": "fallback",
+        }
+        activity = {
+            "transcriptions": [
+                {
+                    "speaker": "system",
+                    "sequence": 20,
+                    "internal_id": "activity-call-1",
+                    "tool_details": {
+                        "function_name": "resolve_customer_context",
+                        "params": {},
+                        "output": {"success": True, "segment": "unknown"},
+                        "call_source": "trigger",
+                        "trigger_type": "on_start",
+                    },
+                }
+            ]
+        }
+
+        view = normalize_attempt(
+            campaign="test",
+            scenario="startup-fallback",
+            short="startup-fallback",
+            round_=1,
+            result=result,
+            activity=activity,
+        )
+        checks = by_name(check_turn(view.turns[0]))
+
+        self.assertTrue(checks["declared_mocks_called"].passed)
+        self.assertNotIn("tool_call_present", checks)
+
+    def test_start_scoped_business_passthrough_still_implies_a_tool_call(self) -> None:
+        result = self.startup_result()
+        result["scenario_definition"]["instructions"]["start_tool_mocks"] = [
+            {
+                "enabled": False,
+                "tool_name": "search_vera",
+                "expected_input": {"query": "PUK"},
+                "mock_output": {},
+            }
+        ]
+        result["scenario_definition"]["instructions"]["turns"][0]["metadata"]["evalkit_v5"] = {
+            "response_mode": "fallback",
+        }
+
+        view = normalize_attempt(
+            campaign="test",
+            scenario="business-start-expectation",
+            short="business-start-expectation",
+            round_=1,
+            result=result,
+        )
+        checks = by_name(check_turn(view.turns[0]))
+
+        self.assertFalse(checks["tool_call_present"].passed)
+
+    def test_only_matched_control_plane_mock_is_excluded_from_business_expectations(self) -> None:
+        result = self.startup_result()
+        result["scenario_definition"]["instructions"]["start_tool_mocks"].append(
+            {
+                "enabled": False,
+                "tool_name": "search_vera",
+                "expected_input": {"query": "PUK"},
+                "mock_output": {},
+            }
+        )
+        result["scenario_definition"]["instructions"]["turns"][0]["metadata"]["evalkit_v5"] = {
+            "response_mode": "fallback",
+        }
+        activity = {
+            "transcriptions": [
+                {
+                    "speaker": "system",
+                    "sequence": 20,
+                    "internal_id": "trigger-call",
+                    "tool_details": {
+                        "function_name": "resolve_customer_context",
+                        "params": {},
+                        "output": {"success": True, "segment": "unknown"},
+                        "call_source": "trigger",
+                        "trigger_type": "on_start",
+                    },
+                }
+            ]
+        }
+
+        view = normalize_attempt(
+            campaign="test",
+            scenario="mixed-start-expectations",
+            short="mixed-start-expectations",
+            round_=1,
+            result=result,
+            activity=activity,
+        )
+        checks = by_name(check_turn(view.turns[0]))
+
+        self.assertTrue(checks["declared_mocks_called"].passed)
+        self.assertFalse(checks["tool_call_present"].passed)
+
     def test_unbounded_activity_business_copy_does_not_override_visible_result(self) -> None:
         result = self.startup_result()
         result["turn_results"][0]["turn_state"]["agent_responses"].insert(

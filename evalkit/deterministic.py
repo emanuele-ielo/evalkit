@@ -345,6 +345,17 @@ def check_turn(turn: TurnView, *, require_tool_call: bool | None = None) -> list
         for m in turn.expected.declared_mocks
         if m.get("tool_name") or m.get("name")
     ]
+    control_plane_mock_indexes = {
+        call.declared_mock_index
+        for call in turn.tool_calls
+        if call.is_control_plane and call.declared_mock_index is not None
+    }
+    business_expectations = [
+        str(m.get("tool_name") or m.get("name"))
+        for index, m in enumerate(turn.expected.declared_mocks)
+        if (m.get("tool_name") or m.get("name"))
+        and index not in control_plane_mock_indexes
+    ]
     if declared_runtime_mocks:
         declared_counts = Counter(name for _, name in declared_runtime_mocks)
         runtime_mock_indexes = {index for index, _ in declared_runtime_mocks}
@@ -413,7 +424,7 @@ def check_turn(turn: TurnView, *, require_tool_call: bool | None = None) -> list
             needs_tool = False
         else:
             required = contract.get("required_tools") if isinstance(contract, dict) else None
-            needs_tool = bool(required or allowed or declared_expectations)
+            needs_tool = bool(required or allowed or business_expectations)
     if needs_tool:
         checks.append(
             DeterministicCheck(
