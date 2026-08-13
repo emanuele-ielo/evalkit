@@ -292,8 +292,9 @@ def build_vote_prompt(
 
     parts.append(f"## USER MESSAGE\n{turn.user_message or '(none recorded)'}")
 
-    if turn.tool_calls:
-        payloads = "\n\n".join(_format_payload(call) for call in turn.tool_calls)
+    business_calls = [call for call in turn.tool_calls if not call.is_trigger]
+    if business_calls:
+        payloads = "\n\n".join(_format_payload(call) for call in business_calls)
     else:
         payloads = "(the agent called no tool in this turn — nothing supports any factual claim)"
     parts.append(f"## TOOL PAYLOADS (the only admissible source of facts)\n{payloads}")

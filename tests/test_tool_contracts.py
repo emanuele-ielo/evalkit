@@ -3,7 +3,8 @@ from __future__ import annotations
 import unittest
 
 from evalkit.deterministic import blocking_failures, check_turn, taxonomy_from_checks
-from evalkit.normalize import _mark_mocks, _tool_call_view
+from evalkit.judge.rubric import build_vote_prompt
+from evalkit.normalize import _mark_mocks, _tool_call_view, normalize_attempt
 from evalkit.schemas import ExpectedTurnView, ToolCallView, TurnView
 
 
@@ -28,6 +29,270 @@ def by_name(checks):
 
 
 class ToolContractsTest(unittest.TestCase):
+    @staticmethod
+    def startup_result() -> dict:
+        mock = {
+            "tool_name": "resolve_customer_context",
+            "expected_input": {},
+            "mock_output": {"success": True, "segment": "interforze"},
+        }
+        return {
+            "scenario_definition": {
+                "name": "startup-trigger",
+                "instructions": {
+                    "start_tool_mocks": [mock],
+                    "turns": [
+                        {
+                            "user_message": "Domanda incompleta",
+                            "tools_allowed": [],
+                            "metadata": {
+                                "evalkit_v5": {
+                                    "response_mode": "clarify",
+                                }
+                            },
+                        }
+                    ],
+                },
+            },
+            "turn_results": [
+                {
+                    "evaluation_turn": {"user_message": "Domanda incompleta"},
+                    "turn_state": {
+                        "agent_responses": [
+                            {"speaker": "agent", "text": "Quale dettaglio ti serve?"}
+                        ]
+                    },
+                }
+            ],
+        }
+
+    def test_normalizer_recovers_drained_on_start_mock_from_activity(self) -> None:
+        activity = {
+            "transcriptions": [
+                {
+                    "speaker": "system",
+                    "sequence": 20,
+                    "internal_id": "activity-call-1",
+                    "tool_details": {
+                        "function_name": "resolve_customer_context",
+                        "params": {},
+                        "output": {"success": True, "segment": "interforze"},
+                        "call_source": "trigger",
+                        "trigger_type": "on_start",
+                    },
+                }
+            ]
+        }
+        view = normalize_attempt(
+            campaign="test",
+            scenario="startup",
+            short="startup",
+            round_=1,
+            result=self.startup_result(),
+            activity=activity,
+        )
+
+        self.assertEqual(len(view.turns[0].tool_calls), 1)
+        self.assertTrue(view.turns[0].tool_calls[0].is_trigger)
+        self.assertEqual(view.turns[0].tool_calls[0].call_id, "activity-call-1")
+        self.assertEqual(view.turns[0].tool_calls[0].declared_mock_index, 0)
+        self.assertTrue(view.turns[0].tool_calls[0].matches_mock)
+        checks = by_name(check_turn(view.turns[0]))
+        self.assertTrue(checks["declared_mocks_called"].passed)
+        self.assertTrue(checks["clarification_no_tool"].passed)
+
+    def test_normalizer_uses_trace_fallback_and_deduplicates_activity(self) -> None:
+        details = {
+            "function_name": "resolve_customer_context",
+            "params": {},
+            "output": {"success": True, "segment": "interforze"},
+            "call_source": "trigger",
+            "trigger_type": "on_start",
+        }
+        activity = {"transcriptions": [{"tool_details": details}]}
+        trace = {
+            "spans": [
+                {
+                    "name": "tool.call",
+                    "attributes": {
+                        "gen_ai.tool.name": "resolve_customer_context",
+                        "gen_ai.tool.call.arguments": "{}",
+                        "gen_ai.tool.call.result": '{"success":true,"segment":"interforze"}',
+                        "wonderful.tool.trigger_type": "on_start",
+                        "wonderful.tool.on_start": True,
+                    },
+                }
+            ]
+        }
+        with_both = normalize_attempt(
+            campaign="test",
+            scenario="startup",
+            short="startup",
+            round_=1,
+            result=self.startup_result(),
+            activity=activity,
+            trace=trace,
+        )
+        trace_only = normalize_attempt(
+            campaign="test",
+            scenario="startup",
+            short="startup",
+            round_=1,
+            result=self.startup_result(),
+            trace=trace,
+        )
+
+        self.assertEqual(len(with_both.turns[0].tool_calls), 1)
+        self.assertEqual(len(trace_only.turns[0].tool_calls), 1)
+        self.assertTrue(by_name(check_turn(trace_only.turns[0]))["declared_mocks_called"].passed)
+
+    def test_visible_result_trigger_wins_and_is_not_duplicated(self) -> None:
+        result = self.startup_result()
+        result["turn_results"][0]["turn_state"]["agent_responses"].insert(
+            0,
+            {
+                "speaker": "system",
+                "tool_details": {
+                    "function_name": "resolve_customer_context",
+                    "params": {},
+                    "output": {"success": True, "segment": "interforze"},
+                    "call_source": "trigger",
+                    "trigger_type": "on_start",
+                    "call_id": "visible-result-call",
+                },
+            },
+        )
+        activity = {
+            "transcriptions": [
+                {
+                    "internal_id": "activity-copy",
+                    "tool_details": {
+                        "function_name": "resolve_customer_context",
+                        "params": {},
+                        "output": {"success": True, "segment": "interforze"},
+                        "call_source": "trigger",
+                        "trigger_type": "on_start",
+                    },
+                }
+            ]
+        }
+        view = normalize_attempt(
+            campaign="test",
+            scenario="startup",
+            short="startup",
+            round_=1,
+            result=result,
+            activity=activity,
+        )
+
+        self.assertEqual(len(view.turns[0].tool_calls), 1)
+        self.assertEqual(view.turns[0].tool_calls[0].call_id, "visible-result-call")
+
+    def test_missing_activity_and_trace_keeps_start_mock_failure_blocking(self) -> None:
+        view = normalize_attempt(
+            campaign="test",
+            scenario="startup",
+            short="startup",
+            round_=1,
+            result=self.startup_result(),
+        )
+        check = by_name(check_turn(view.turns[0]))["declared_mocks_called"]
+
+        self.assertFalse(check.passed)
+        self.assertTrue(check.blocking)
+
+    def test_activity_imports_only_startup_triggers_not_business_calls(self) -> None:
+        result = self.startup_result()
+        result["turn_results"][0]["turn_state"]["agent_responses"].insert(
+            0,
+            {
+                "speaker": "system",
+                "tool_details": {
+                    "function_name": "search_vera",
+                    "params": {"query": "fatture"},
+                    "output": {"answer": "result copy"},
+                    "call_id": "visible-search",
+                },
+            },
+        )
+        activity = {
+            "transcriptions": [
+                {
+                    "tool_details": {
+                        "function_name": "search_vera",
+                        "params": {"query": "fatture"},
+                        "output": {"answer": "activity duplicate"},
+                    }
+                },
+                {
+                    "tool_details": {
+                        "function_name": "resolve_customer_context",
+                        "params": {},
+                        "output": {"success": True, "segment": "interforze"},
+                        "call_source": "trigger",
+                        "trigger_type": "on_start",
+                    }
+                },
+            ]
+        }
+        view = normalize_attempt(
+            campaign="test",
+            scenario="startup",
+            short="startup",
+            round_=1,
+            result=result,
+            activity=activity,
+        )
+
+        self.assertEqual(
+            [item.name for item in view.turns[0].tool_calls],
+            ["resolve_customer_context", "search_vera"],
+        )
+        self.assertEqual(view.turns[0].tool_calls[1].output, {"answer": "result copy"})
+
+    def test_judge_prompt_excludes_trigger_payload_but_keeps_business_payload(self) -> None:
+        result = self.startup_result()
+        result["scenario_definition"]["instructions"]["start_tool_mocks"][0]["mock_output"] = {
+            "success": True,
+            "bootstrap": "BOOTSTRAP_SENTINEL",
+        }
+        result["turn_results"][0]["turn_state"]["agent_responses"].insert(
+            0,
+            {
+                "speaker": "system",
+                "tool_details": {
+                    "function_name": "search_vera",
+                    "params": {"query": "fatture"},
+                    "output": {"answer": "BUSINESS_SENTINEL"},
+                },
+            },
+        )
+        activity = {
+            "transcriptions": [
+                {
+                    "tool_details": {
+                        "function_name": "resolve_customer_context",
+                        "params": {},
+                        "output": {"success": True, "bootstrap": "BOOTSTRAP_SENTINEL"},
+                        "call_source": "trigger",
+                        "trigger_type": "on_start",
+                    }
+                }
+            ]
+        }
+        view = normalize_attempt(
+            campaign="test",
+            scenario="startup",
+            short="startup",
+            round_=1,
+            result=result,
+            activity=activity,
+        )
+        _, prompt = build_vote_prompt(view, view.turns[0], check_turn(view.turns[0]))
+
+        self.assertIn("BUSINESS_SENTINEL", prompt)
+        self.assertNotIn("BOOTSTRAP_SENTINEL", prompt)
+
     def test_normalizer_preserves_lifecycle_trigger_metadata(self) -> None:
         view = _tool_call_view(
             0,

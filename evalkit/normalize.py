@@ -102,6 +102,126 @@ def _tool_call_view(index: int, details: dict[str, Any]) -> ToolCallView:
     )
 
 
+def _normalized_trigger_type(value: Any) -> str:
+    return "".join(character for character in str(value or "").lower() if character.isalnum())
+
+
+def _is_on_start_call(call: ToolCallView) -> bool:
+    return call.is_trigger and _normalized_trigger_type(call.trigger_type) == "onstart"
+
+
+def _startup_call_signature(call: ToolCallView) -> tuple[str, str, str, str]:
+    """Fallback identity when different persistence layers expose different call ids."""
+    return (
+        call.name,
+        canonical(call.args or {}),
+        canonical(call.output),
+        _normalized_trigger_type(call.trigger_type),
+    )
+
+
+def _same_startup_call(left: ToolCallView, right: ToolCallView) -> bool:
+    if left.call_id and right.call_id and left.call_id == right.call_id:
+        return True
+    return _startup_call_signature(left) == _startup_call_signature(right)
+
+
+def _activity_startup_calls(activity: Any) -> list[ToolCallView]:
+    """Recover startup calls that the V3 scripted controller drains before turn 1.
+
+    Activity transcriptions are permanent and retain complete tool details, including
+    lifecycle provenance and mock output. They are therefore the primary source for
+    calls that are absent from ``result.turn_results``.
+    """
+    if not isinstance(activity, dict):
+        return []
+    transcriptions = activity.get("transcriptions")
+    if not isinstance(transcriptions, list):
+        return []
+    calls: list[ToolCallView] = []
+    def sequence_key(item: dict[str, Any]) -> tuple[int, int | str]:
+        value = item.get("sequence")
+        try:
+            return (0, int(value))
+        except (TypeError, ValueError):
+            return (1, str(value or ""))
+
+    ordered = sorted(
+        (item for item in transcriptions if isinstance(item, dict)),
+        key=sequence_key,
+    )
+    for transcription in ordered:
+        details = transcription.get("tool_details")
+        if not isinstance(details, dict) or not details:
+            continue
+        complete_details = dict(details)
+        if not complete_details.get("call_id") and transcription.get("internal_id"):
+            complete_details["call_id"] = transcription["internal_id"]
+        call = _tool_call_view(len(calls), complete_details)
+        if _is_on_start_call(call):
+            calls.append(call)
+    return calls
+
+
+def _startup_calls(activity: Any, parsed_trace: dict[str, Any]) -> list[ToolCallView]:
+    """Merge permanent activity evidence with trace fallback, without double-counting."""
+    candidates = _activity_startup_calls(activity)
+    for traced in parsed_trace.get("trace_tool_calls") or []:
+        details = traced.get("details") if isinstance(traced, dict) else None
+        if not isinstance(details, dict):
+            continue
+        call = _tool_call_view(len(candidates), details)
+        if _is_on_start_call(call):
+            candidates.append(call)
+
+    unique: list[ToolCallView] = []
+    for call in candidates:
+        if any(_same_startup_call(existing, call) for existing in unique):
+            continue
+        unique.append(call.model_copy(update={"index": len(unique)}))
+    return unique
+
+
+def _prepend_missing_startup_calls(
+    visible: list[ToolCallView],
+    messages: list[MessageView],
+    recovered: list[ToolCallView],
+) -> tuple[list[ToolCallView], list[MessageView]]:
+    """Keep visible result calls authoritative; prepend only evidence it omitted."""
+    missing = [
+        call
+        for call in recovered
+        if not any(_same_startup_call(existing, call) for existing in visible)
+    ]
+    if not missing:
+        return (
+            [call.model_copy(update={"index": index}) for index, call in enumerate(visible)],
+            [message.model_copy(update={"index": index}) for index, message in enumerate(messages)],
+        )
+
+    shift = len(missing)
+    calls = [*missing, *visible]
+    calls = [call.model_copy(update={"index": index}) for index, call in enumerate(calls)]
+    startup_messages = [
+        MessageView(index=index, role="tool", tool_index=index)
+        for index in range(shift)
+    ]
+    shifted = [
+        message.model_copy(
+            update={
+                "index": index + shift,
+                "tool_index": (
+                    message.tool_index + shift
+                    if message.tool_index is not None
+                    else None
+                ),
+            }
+        )
+        for index, message in enumerate(messages)
+    ]
+    return calls, [*startup_messages, *shifted]
+
+
 def _official_view(turn_state: dict[str, Any], failure_reason: str | None) -> OfficialJudgeView | None:
     evaluations = turn_state.get("llm_judge_evaluation_results") or []
     if not evaluations:
@@ -276,6 +396,10 @@ def _parse_trace(trace: Any) -> dict[str, Any]:
             )
         elif name == "tool.call":
             result = attrs.get("gen_ai.tool.call.result")
+            trigger_type = attrs.get("wonderful.tool.trigger_type")
+            on_start = attrs.get("wonderful.tool.on_start") is True or (
+                _normalized_trigger_type(trigger_type) == "onstart"
+            )
             out["trace_tool_calls"].append(
                 {
                     "name": attrs.get("gen_ai.tool.name"),
@@ -285,6 +409,14 @@ def _parse_trace(trace: Any) -> dict[str, Any]:
                     "duration_ms": (span.get("duration_us") or 0) / 1000.0,
                     "outcome": attrs.get("wonderful.outcome"),
                     "kind": attrs.get("wonderful.tool.kind"),
+                    "details": {
+                        "function_name": attrs.get("gen_ai.tool.name"),
+                        "params": attrs.get("gen_ai.tool.call.arguments"),
+                        "output": result,
+                        "call_source": "trigger" if on_start else None,
+                        "trigger_type": trigger_type,
+                        "call_id": span.get("span_id"),
+                    },
                 }
             )
     return out
@@ -348,6 +480,7 @@ def normalize_attempt(
 
     parsed_trace = _parse_trace(trace)
     system_prompt = parsed_trace["system_prompt"]
+    startup_calls = _startup_calls(activity, parsed_trace)
 
     turns: list[TurnView] = []
     llm_calls: list[LLMCallView] = list(parsed_trace["llm_calls"])
@@ -394,6 +527,13 @@ def normalize_attempt(
                     text=text,
                     timestamp=response.get("timestamp"),
                 )
+                )
+
+        if turn_index == 0:
+            tool_calls, messages = _prepend_missing_startup_calls(
+                tool_calls,
+                messages,
+                startup_calls,
             )
 
         expected = _expected_view(scenario_turn, default_prompt, start_mocks, turn_index == 0)
