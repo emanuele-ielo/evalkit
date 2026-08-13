@@ -48,6 +48,6 @@ wful_profile = "tim-enterprise-sandbox"
 workspace = "2b85609f-8bf7-5a1b-9c67-e7907f0cb180"
 repo = "~/GIT/wonderful/Vera/agent-vera"
 # Default scenario set: the batch file listing the slugs to run.
-batch = "customer_care_full_v1_115"
+batch = "full"
 concurrency = 24
 rounds = 3
