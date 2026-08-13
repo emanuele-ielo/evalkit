@@ -16,6 +16,8 @@ to individual conversations.
 
 <p align="center">
   <img src="docs/assets/evalkit-dashboard.png" alt="EvalKit campaign dashboard with scores, judging progress, criteria, and failure tags" width="1200">
+  <br>
+  <sub><strong>Full-suite campaign:</strong> live judging progress, criteria scores, and failure taxonomy.</sub>
 </p>
 
 ## What it does
@@ -94,6 +96,12 @@ before the LLM judge runs:
 `expected_input` on a tool mock is checked structurally (`{}` therefore means
 the tool must receive no arguments). Repeated mocks for the same tool are
 matched and consumed independently, so order and multiplicity are observable.
+
+<p align="center">
+  <img src="docs/assets/evalkit-api-gate-dashboard.png" alt="EvalKit API regression gate dashboard showing 16 passing scenarios across three rounds" width="1200">
+  <br>
+  <sub><strong>API regression gate:</strong> 16 scenarios across 3 rounds, with deterministic checks and per-scenario drill-down.</sub>
+</p>
 
 For Vera the default is the full 115-scenario suite (70 knowledge/customer-care
 + 45 API scenarios), 3 rounds, execution concurrency 24 and judge concurrency
