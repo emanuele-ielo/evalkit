@@ -2,16 +2,15 @@
 
 Design rules, all enforced here rather than trusted to callers:
 
-1. **Allowlist.** Only the read-only commands the kit needs, plus `eval run`
-   (the one command that costs platform work). Anything else raises — no
-   `pr merge`, no `publish`, no table writes can come out of evalkit.
+1. **Allowlist.** Only context/provenance reads and snapshot creation are
+   available. Platform ``eval run`` is deliberately forbidden: iterative
+   execution goes through the direct Chat V3 collector and judging is local.
 2. **Explicit context.** Every call carries `--profile`, `--workspace` and
    `--agent` (plus `--json --no-interactive`), so a shell's active profile can
    never silently retarget a run.
-3. **Exit code 1 is not an error.** `wful eval run` exits 1 when the run
-   completed but the judge said fail. We decide from the JSON on stdout; only a
-   missing/unparseable payload is a real failure. Exit code 2 means the CLI was
-   invoked wrong and the payload is help text on stderr.
+3. **Strict payloads.** A missing/unparseable JSON payload is a failure. Exit
+   code 2 means the CLI was invoked wrong and the payload is help text on
+   stderr.
 """
 
 from __future__ import annotations
@@ -28,9 +27,6 @@ ALLOWED_COMMANDS: frozenset[tuple[str, str]] = frozenset(
         ("agents", "snapshot"),
         ("agents", "get"),
         ("agents", "list"),
-        ("eval", "run"),
-        ("eval", "status"),
-        ("eval", "result"),
         ("traces", "call"),
         ("traces", "exists"),
         ("activities", "get"),
@@ -111,7 +107,7 @@ class WfulClient:
         *,
         agent: str | None = None,
         timeout: float | None = 300.0,
-        allow_exit_one: bool = True,
+        allow_exit_one: bool = False,
     ) -> Any:
         """Run a wful command and return its parsed JSON payload."""
         cmd = self._build(args, agent=agent)
@@ -175,30 +171,14 @@ class WfulClient:
 
     # -- convenience wrappers ------------------------------------------------
 
-    async def eval_run(self, slug: str, snapshot_id: str, *, timeout: float, poll: str = "5s") -> Any:
-        return await self.run_json(
-            [
-                "eval",
-                "run",
-                slug,
-                "--snapshot-id",
-                snapshot_id,
-                "--poll",
-                poll,
-                "--poll-timeout",
-                f"{int(timeout)}s",
-            ],
-            timeout=timeout + 60,
-        )
-
-    async def eval_result(self, result_id: str, *, timeout: float = 120.0) -> Any:
-        return await self.run_json(["eval", "result", result_id, "--show-all-turns"], timeout=timeout)
-
-    async def eval_status(self, run_id: str, *, timeout: float = 60.0) -> Any:
-        return await self.run_json(["eval", "status", run_id], timeout=timeout)
-
     async def snapshot(self, *, timeout: float = 120.0) -> Any:
         return await self.run_json(["agents", "snapshot"], timeout=timeout)
+
+    async def whoami(self, *, timeout: float = 60.0) -> Any:
+        return await self.run_json(["whoami"], timeout=timeout)
+
+    async def agent_details(self, ref: str, *, timeout: float = 60.0) -> Any:
+        return await self.run_json(["agents", "get"], agent=ref, timeout=timeout)
 
     async def activity(self, communication_id: str, *, timeout: float = 120.0) -> Any | None:
         """Fetch the communication record: agent-side token usage (incl. cache),

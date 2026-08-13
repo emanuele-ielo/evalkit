@@ -99,6 +99,8 @@ def build_report(store: CampaignStore, manifest: CampaignManifest) -> CampaignRe
             legacy_verdicts += 1
         by_scenario.setdefault(ref.scenario, []).append((ref.round, verdict, ref.official_passed))
 
+        if ref.official_passed is not None:
+            report.official_attempts_available += 1
         if ref.official_passed:
             report.official_pass_attempts += 1
         if verdict is None:
@@ -110,7 +112,8 @@ def build_report(store: CampaignStore, manifest: CampaignManifest) -> CampaignRe
         attempt_scores.append(verdict.score)
         score_dist[str(int(round(verdict.score)))] += 1
         judge_tokens = judge_tokens + verdict.tokens
-        agreement[verdict.agreement] += 1
+        if verdict.official_passed is not None:
+            agreement[verdict.agreement] += 1
         if verdict.passed:
             report.our_pass_attempts += 1
             per_round_pass[str(ref.round)] += 1
@@ -146,7 +149,8 @@ def build_report(store: CampaignStore, manifest: CampaignManifest) -> CampaignRe
     for scenario, rows in sorted(by_scenario.items()):
         judged = [(round_, verdict) for round_, verdict, _ in rows if verdict is not None]
         our_passes = sum(1 for _, verdict in judged if verdict.passed)
-        official_passes = sum(1 for _, _, official in rows if official)
+        official_values = [official for _, _, official in rows if official is not None]
+        official_passes = sum(1 for official in official_values if official)
         short = next((ref.short for ref in manifest.attempts if ref.scenario == scenario), scenario)
         scenario_scores = [verdict.score for _, verdict in judged]
         outcome = ScenarioOutcome(
@@ -157,8 +161,9 @@ def build_report(store: CampaignStore, manifest: CampaignManifest) -> CampaignRe
             judged_rounds=len(judged),
             our_passes=our_passes,
             official_passes=official_passes,
+            official_rounds=len(official_values),
             our_majority=_majority(our_passes, len(judged)),
-            official_majority=_majority(official_passes, len(rows)),
+            official_majority=_majority(official_passes, len(official_values)),
             stability=_stability(our_passes, len(judged)),  # type: ignore[arg-type]
             taxonomy=sorted({tag for _, verdict in judged for tag in verdict.taxonomy}),
         )
@@ -171,9 +176,11 @@ def build_report(store: CampaignStore, manifest: CampaignManifest) -> CampaignRe
             report.our_all_pass += 1
         if outcome.official_majority:
             report.official_majority_pass += 1
+        if official_values:
+            report.official_scenarios_available += 1
         if official_passes >= 1:
             report.official_any_pass += 1
-        if rows and official_passes == len(rows):
+        if official_values and official_passes == len(official_values):
             report.official_all_pass += 1
 
     report.criteria = [
@@ -218,6 +225,8 @@ def build_report(store: CampaignStore, manifest: CampaignManifest) -> CampaignRe
     missing = report.attempts_total - report.attempts_collected
     if missing > 0:
         notes.append(f"{missing} attempt(s) have no result payload yet")
+    if report.attempts_collected and report.official_attempts_available == 0:
+        notes.append("no Wonderful platform verdicts — expected for direct Chat V3 campaigns")
     if report.trace_coverage < report.attempts_collected:
         notes.append(
             f"{report.attempts_collected - report.trace_coverage} attempt(s) without a trace "
@@ -376,15 +385,27 @@ def format_report(report: CampaignReport, *, compact: bool = False) -> str:
         lines.append(f"  SCORE  {report.mean_score:.2f} / 5   (mean over {report.attempts_judged} attempts)")
         spread = " ".join(f"{k}★:{v}" for k, v in report.score_distribution.items())
         lines.append(f"         {spread}")
+    def ratio(passes: int, total: int) -> str:
+        return f"{passes}/{total}" if total else "—"
+
     lines.append("")
-    lines.append("                       ours      official")
-    denom_s = report.scenarios_total
-    lines.append(f"  majority pass      {report.our_majority_pass:>4}/{denom_s:<4}  {report.official_majority_pass:>4}/{denom_s}")
-    lines.append(f"  any-round pass     {report.our_any_pass:>4}/{denom_s:<4}  {report.official_any_pass:>4}/{denom_s}")
-    lines.append(f"  all-rounds pass    {report.our_all_pass:>4}/{denom_s:<4}  {report.official_all_pass:>4}/{denom_s}")
+    lines.append("                          ours   official")
+    official_scenarios = report.official_scenarios_available
     lines.append(
-        f"  attempts passed    {report.our_pass_attempts:>4}/{report.attempts_judged:<4}  "
-        f"{report.official_pass_attempts:>4}/{report.attempts_total}"
+        f"  majority pass      {ratio(report.our_majority_pass, report.scenarios_total):>9}  "
+        f"{ratio(report.official_majority_pass, official_scenarios):>9}"
+    )
+    lines.append(
+        f"  any-round pass     {ratio(report.our_any_pass, report.scenarios_total):>9}  "
+        f"{ratio(report.official_any_pass, official_scenarios):>9}"
+    )
+    lines.append(
+        f"  all-rounds pass    {ratio(report.our_all_pass, report.scenarios_total):>9}  "
+        f"{ratio(report.official_all_pass, official_scenarios):>9}"
+    )
+    lines.append(
+        f"  attempts passed    {ratio(report.our_pass_attempts, report.attempts_judged):>9}  "
+        f"{ratio(report.official_pass_attempts, report.official_attempts_available):>9}"
     )
 
     if report.criteria:
@@ -451,7 +472,7 @@ def format_scenario_table(report: CampaignReport, *, limit: int | None = None) -
     lines = [f"{'scenario':<12} {'score':>6} {'ours':>6} {'official':>9}  stability    top quality tags"]
     for row in rows:
         ours = f"{row.our_passes}/{row.judged_rounds}"
-        official = f"{row.official_passes}/{row.rounds_total}"
+        official = f"{row.official_passes}/{row.official_rounds}" if row.official_rounds else "—"
         score = f"{row.score:.2f}" if row.score is not None else "—"
         tags = ", ".join(row.taxonomy[:3])
         lines.append(f"{row.short:<12} {score:>6} {ours:>6} {official:>9}  {row.stability:<12} {tags}")

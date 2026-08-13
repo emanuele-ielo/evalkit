@@ -55,6 +55,7 @@ export interface ScenarioOutcome {
   rounds_total: number
   our_passes: number
   official_passes: number
+  official_rounds: number
   our_majority: boolean | null
   official_majority: boolean | null
   stability: 'stable_pass' | 'stable_fail' | 'flaky' | 'unknown'
@@ -81,9 +82,11 @@ export interface CampaignReport {
   our_any_pass: number
   our_all_pass: number
   official_pass_attempts: number
+  official_attempts_available: number
   official_majority_pass: number
   official_any_pass: number
   official_all_pass: number
+  official_scenarios_available: number
   agreement: Record<string, number>
   criteria: { name: string; attempts_judged: number; attempts_passed: number; mean_score: number; distribution: Record<string, number> }[]
   deterministic_failures: Record<string, number>

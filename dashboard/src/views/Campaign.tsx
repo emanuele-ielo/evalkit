@@ -145,6 +145,7 @@ export default function Campaign({ id }: { id: string }) {
 
   const { report, manifest, rounds } = data
   const scored = hasScores(report)
+  const hasOfficial = report.official_scenarios_available > 0
   const running = data.matrix.some((row) => Object.values(row.cells).some((cell) => cell.status === 'running'))
   const unjudged = report.attempts_collected - report.attempts_judged
   const judgedRoundsMax = Math.max(0, ...report.scenarios.map((scenario) => scenario.judged_rounds))
@@ -224,15 +225,15 @@ export default function Campaign({ id }: { id: string }) {
           </span>
           <span
             className={`foot${
-              report.attempts_judged === 0 || report.our_all_pass === report.official_all_pass
+              !hasOfficial || report.our_all_pass === report.official_all_pass
                 ? ''
                 : report.our_all_pass > report.official_all_pass
                   ? ' up'
                   : ' down'
             }`}
           >
-            {report.attempts_judged === 0
-              ? `the platform judge passed ${report.official_all_pass}`
+            {!hasOfficial
+              ? 'no platform verdict for this direct campaign'
               : report.our_all_pass === report.official_all_pass
                 ? 'same as the platform judge'
                 : `${report.our_all_pass > report.official_all_pass ? '+' : ''}${report.our_all_pass - report.official_all_pass} vs platform judge`}

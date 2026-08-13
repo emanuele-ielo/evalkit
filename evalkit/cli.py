@@ -2,7 +2,7 @@
 
     evalkit doctor                              check wiring without touching anything
     evalkit import <source> --label …           cached eval results → a campaign
-    evalkit run --agent vera --rounds 3         run scenarios live (the only writing command)
+    evalkit run --agent vera --rounds 3         collect via Chat V3 + judge locally
     evalkit judge <campaign>                    grade (or re-grade) with our rubric
     evalkit reaggregate <campaign>              recompute pass from stored votes, no LLM calls
     evalkit report <campaign> [--vs other]      the numbers, and the diff between runs
@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .config import Config, ConfigError, load_config, load_llm_credentials
+from .direct_chat import DirectChatError
 from .importers import import_results
 from .judge.rubric import RUBRIC_VERSION
 from .report import (
@@ -108,7 +109,7 @@ def cmd_doctor(args: argparse.Namespace, config: Config) -> int:
             print(f"  wful: {exc}")
             continue
         try:
-            who = asyncio.run(client.run_json(["whoami"], timeout=60))
+            who = asyncio.run(client.whoami(timeout=60))
             email = who.get("email") or who.get("user", {}).get("email") if isinstance(who, dict) else None
             print(f"  wful: OK{f' as {email}' if email else ''}")
         except (WfulError, WfulNotAllowed) as exc:
@@ -238,6 +239,7 @@ def cmd_run(args: argparse.Namespace, config: Config) -> int:
         f"{len(manifest.attempts)} attempt(s), concurrency {concurrency}"
         + (", judging inline" if not args.no_judge else ", no inline judging")
     )
+    print("collector: Wonderful Chat V3 direct; Wonderful eval/judge APIs are not invoked")
     if args.dry_run:
         for scenario in scenarios:
             print(f"  would run {scenario}")
@@ -509,7 +511,10 @@ def build_parser() -> argparse.ArgumentParser:
     importer.add_argument("--force", action="store_true", help="overwrite an existing campaign id")
     importer.set_defaults(func=cmd_import)
 
-    runner = subparsers.add_parser("run", help="run scenarios live against a snapshot")
+    runner = subparsers.add_parser(
+        "run",
+        help="collect scenarios directly against a snapshot and judge locally",
+    )
     runner.add_argument("--agent", required=True, help="agent profile from evalkit.toml")
     runner.add_argument("--scenarios", nargs="*", help="scenario slugs or substrings; 'all' for the whole repo")
     runner.add_argument("--batch", help="batch slug in the agent repo (default: the profile's batch)")
@@ -521,7 +526,7 @@ def build_parser() -> argparse.ArgumentParser:
     runner.add_argument("--limit", type=int, help="only the first N scenarios (smoke runs)")
     runner.add_argument("--votes", type=int, help="judge votes per turn when judging inline")
     runner.add_argument("--no-judge", action="store_true", help="collect only, judge later")
-    runner.add_argument("--timeout", type=float, default=900.0, help="per-scenario timeout in seconds")
+    runner.add_argument("--timeout", type=float, default=900.0, help="per-scenario Chat V3 timeout in seconds")
     runner.add_argument("--resume", help="resume an existing campaign id")
     runner.add_argument("--dry-run", action="store_true")
     runner.set_defaults(func=cmd_run)
@@ -575,7 +580,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\ninterrupted — progress is on disk; re-run with --resume", file=sys.stderr)
         return 130
-    except (WfulError, WfulNotAllowed, ConfigError) as exc:
+    except (WfulError, WfulNotAllowed, DirectChatError, ConfigError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

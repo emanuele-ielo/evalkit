@@ -1,4 +1,4 @@
-"""Live campaigns: our orchestration on top of `wful eval run`.
+"""Live campaigns collected directly from snapshot-pinned Chat V3 sessions.
 
 Why orchestrate per scenario instead of running the platform batch:
 
@@ -7,11 +7,13 @@ Why orchestrate per scenario instead of running the platform batch:
 * **Nothing is lost.** Each attempt is persisted the moment it finishes — result,
   trace (fetched immediately, since retention is short), activity record — so a
   crashed or cancelled campaign resumes instead of restarting.
-* **Exit code 1 is a verdict, not a failure** (`wful.py` handles that), and a
-  scenario that errors never takes the campaign down with it.
+* **Judging is local.** The Wonderful eval/judge APIs are not invoked during
+  development runs, so they cannot add cost or truncate a multi-turn scenario.
+* **Failures stay scoped.** A scenario that errors never takes the campaign
+  down with it.
 
-The one write this kit performs against the platform is `eval run`; everything
-else it touches is read-only, enforced by the wful wrapper's allowlist.
+The platform supplies the agent runtime, immutable snapshot and traces. EvalKit
+supplies orchestration, deterministic checks and the LLM judge.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from .config import AgentConfig, Config
+from .direct_chat import DirectChatCollector
 from .judge.llm import JudgeLLM
 from .judge.runner import judge_attempt, load_view
 from .schemas import AgentTarget, AttemptRef, CampaignManifest
@@ -158,61 +161,6 @@ async def mint_snapshot(client: WfulClient, repo: Path | None) -> tuple[str, str
 
 
 # --------------------------------------------------------------------------
-# Result extraction
-# --------------------------------------------------------------------------
-
-
-def _looks_like_result(payload: Any) -> bool:
-    return isinstance(payload, dict) and "turn_results" in payload
-
-
-def _find_result_ids(payload: Any) -> list[str]:
-    """Collect candidate eval-result ids from an `eval run` response."""
-    found: list[str] = []
-
-    def walk(node: Any) -> None:
-        if isinstance(node, dict):
-            for key in ("result_id", "eval_result_id", "id"):
-                value = node.get(key)
-                if isinstance(value, str) and len(value) >= 32 and key != "run_id":
-                    found.append(value)
-            for value in node.values():
-                walk(value)
-        elif isinstance(node, list):
-            for item in node:
-                walk(item)
-
-    walk(payload)
-    return list(dict.fromkeys(found))
-
-
-async def resolve_result(client: WfulClient, payload: Any) -> tuple[dict[str, Any] | None, str | None]:
-    """Turn an `eval run` response into a full result payload.
-
-    `eval run` may already print the result; when it prints a run summary we
-    follow the ids it carries and fetch the result proper.
-    """
-    if _looks_like_result(payload):
-        return payload, payload.get("_run_id") or payload.get("run_id")
-    run_id = payload.get("run_id") if isinstance(payload, dict) else None
-    if isinstance(payload, dict):
-        for key in ("results", "scenario_results", "attempts"):
-            candidates = payload.get(key)
-            if isinstance(candidates, list):
-                for candidate in candidates:
-                    if _looks_like_result(candidate):
-                        return candidate, run_id
-    for result_id in _find_result_ids(payload):
-        try:
-            fetched = await client.eval_result(result_id)
-        except WfulError:
-            continue
-        if _looks_like_result(fetched):
-            return fetched, run_id
-    return None, run_id
-
-
-# --------------------------------------------------------------------------
 # Campaign
 # --------------------------------------------------------------------------
 
@@ -256,7 +204,12 @@ def build_manifest(
         rounds=rounds,
         concurrency=concurrency,
         scenarios=list(scenarios),
-        source={"kind": "live_run"},
+        source={
+            "kind": "live_run",
+            "collector": "wonderful_chat_v3_direct",
+            "platform_eval_invoked": False,
+            "platform_judge_invoked": False,
+        },
         attempts=attempts,
     )
 
@@ -268,13 +221,14 @@ async def run_campaign(
     agent: AgentConfig,
     *,
     client: WfulClient,
+    collector: DirectChatCollector | None = None,
     judge_inline: bool = True,
     resume: bool = True,
     scenario_timeout: float = 900.0,
     votes: int | None = None,
     progress: ProgressFn | None = None,
 ) -> CampaignManifest:
-    """Execute every pending attempt, persisting as it goes."""
+    """Execute every pending attempt through Chat V3, persisting as it goes."""
     concurrency = manifest.concurrency or agent.concurrency
     semaphore = asyncio.Semaphore(max(1, concurrency))
     lock = asyncio.Lock()
@@ -300,6 +254,13 @@ async def run_campaign(
         for ref in manifest.attempts
         if not (resume and store.attempt_paths(ref.scenario, ref.round).exists())
     ]
+    owns_collector = collector is None
+    if collector is None and todo:
+        collector = await DirectChatCollector.create(
+            agent,
+            client,
+            snapshot_id=manifest.snapshot_id or "",
+        )
     state = {"done": 0, "errors": 0, "passed": 0}
     store.append_event(
         {
@@ -309,6 +270,8 @@ async def run_campaign(
             "concurrency": concurrency,
             "snapshot_id": manifest.snapshot_id,
             "judge_inline": judge_inline,
+            "collector": "wonderful_chat_v3_direct",
+            "platform_judge_invoked": False,
         }
     )
     if progress:
@@ -326,25 +289,22 @@ async def run_campaign(
                 progress({"event": "attempt_started", "scenario": ref.short, "round": ref.round})
 
             started = utcnow()
-            meta: dict[str, Any] = {"started_at": started, "snapshot_id": manifest.snapshot_id}
+            meta: dict[str, Any] = {
+                "started_at": started,
+                "snapshot_id": manifest.snapshot_id,
+                "collector": "wonderful_chat_v3_direct",
+                "platform_eval_invoked": False,
+                "platform_judge_invoked": False,
+            }
             try:
-                payload = await client.eval_run(
-                    ref.scenario, manifest.snapshot_id or "", timeout=scenario_timeout
-                )
-                result, run_id = await resolve_result(client, payload)
-                if result is None:
-                    raise WfulError(
-                        "eval run returned no usable result payload",
-                        args_=["eval", "run", ref.scenario],
-                        returncode=0,
-                    )
-                if run_id:
-                    result["_run_id"] = run_id
+                if collector is None:
+                    raise RuntimeError("direct chat collector is not initialized")
+                result = await collector.collect(ref.scenario, timeout=scenario_timeout)
                 store.write_result(ref.scenario, ref.round, result)
                 ref.result_id = result.get("_result_id") or result.get("id")
-                ref.run_id = run_id
+                ref.run_id = None
                 ref.communication_id = result.get("communication_id")
-                ref.official_passed = result.get("passed")
+                ref.official_passed = None
                 ref.execution_time_ms = result.get("execution_time_ms")
                 ref.status = "collected"
 
@@ -429,7 +389,11 @@ async def run_campaign(
                     }
                 )
 
-    await asyncio.gather(*(execute(ref) for ref in todo), return_exceptions=True)
+    try:
+        await asyncio.gather(*(execute(ref) for ref in todo), return_exceptions=True)
+    finally:
+        if owns_collector and collector is not None:
+            await collector.aclose()
     store.append_event({"type": "campaign_finished", **state})
     if progress:
         progress({"event": "campaign_finished", **state})

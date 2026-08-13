@@ -1,12 +1,13 @@
-"""Raw platform payloads → one normalized `AttemptView`.
+"""Raw direct/imported result payloads → one normalized `AttemptView`.
 
 Every parsing rule the platform imposes on us lives here, so the judge, the
 report and the dashboard all see the same conversation:
 
-* `result.json` (`wful eval result --json`) is the source of truth for the
-  transcript and for **complete** tool payloads: `agent_responses[].tool_details`
-  carries `params` (the call arguments) and `output` (the JSON the tool returned,
-  wrapped as `{"Response": {"result": …}}`). Observed up to 31 KB, untruncated.
+* `result.json` (direct Chat V3 collection or imported `wful eval result`) is the
+  source of truth for the transcript and for **complete** tool payloads:
+  `agent_responses[].tool_details` carries `params` (the call arguments) and
+  `output` (the JSON the tool returned, often wrapped as
+  `{"Response": {"result": …}}`). Observed up to 31 KB, untruncated.
 * `trace.json` (`wful traces call --json`) adds what the result lacks: the agent's
   system prompt (`wonderful.turn.base_prompt`, complete), the model that actually
   answered, skill routing, per-span timings, and the tool call as the model saw

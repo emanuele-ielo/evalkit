@@ -4,7 +4,7 @@
     data/<campaign>/report.json                       last computed report
     data/<campaign>/events.jsonl                      append-only progress log (SSE)
     data/<campaign>/attempts/<scenario>/<round>/
-        result.json    raw `wful eval result --json`
+        result.json    direct Chat V3 result, or imported `wful eval result`
         trace.json     raw `wful traces call --json`, or {"missing": "reason"}
         verdict.json   our AttemptVerdict
         meta.json      timings, ids, prompt hashes

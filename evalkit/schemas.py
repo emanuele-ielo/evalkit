@@ -4,9 +4,9 @@ Three families live here:
 
 * **Storage** — what a campaign and its attempts look like on disk
   (`CampaignManifest`, `AttemptRef`).
-* **Views** — the normalized shape of one attempt, derived from the raw
-  `wful eval result` payload plus its trace. Both the judge and the dashboard
-  consume views, never raw payloads, so the parsing rules live in one place
+* **Views** — the normalized shape of one attempt, derived from a direct Chat V3
+  result (or an imported `wful eval result`) plus its trace. Both the judge and
+  dashboard consume views, never raw payloads, so parsing lives in one place
   (`normalize.py`).
 * **Judgement** — our rubric's structured output (`VoteVerdict`, one per LLM
   vote) and the aggregated `AttemptVerdict`.
@@ -495,6 +495,7 @@ class ScenarioOutcome(BaseModel):
     score: float | None = None
     our_passes: int
     official_passes: int
+    official_rounds: int = 0
     our_majority: bool | None = None
     official_majority: bool | None = None
     stability: Literal["stable_pass", "stable_fail", "flaky", "unknown"] = "unknown"
@@ -532,9 +533,11 @@ class CampaignReport(BaseModel):
     our_all_pass: int = 0
     # Platform numbers, same attempts
     official_pass_attempts: int = 0
+    official_attempts_available: int = 0
     official_majority_pass: int = 0
     official_any_pass: int = 0
     official_all_pass: int = 0
+    official_scenarios_available: int = 0
     agreement: dict[str, int] = Field(default_factory=dict)
     criteria: list[CriterionStats] = Field(default_factory=list)
     deterministic_failures: dict[str, int] = Field(default_factory=dict)
