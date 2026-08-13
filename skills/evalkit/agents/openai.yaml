@@ -1,0 +1,4 @@
+interface:
+  display_name: "EvalKit"
+  short_description: "Run agent development evals directly and judge locally"
+  default_prompt: "Use $evalkit to test this Wonderful agent against a snapshot without invoking the Wonderful platform judge."
