@@ -137,21 +137,53 @@ def _expected_view(
     )
 
 
+def _expected_input_matches(expected: Any, actual: dict[str, Any] | None) -> bool:
+    """Wonderful treats a missing expected_input as a wildcard, `{}` as exact."""
+    if expected is None:
+        return True
+    if not isinstance(expected, dict):
+        return False
+    return canonical(expected) == canonical(actual or {})
+
+
 def _mark_mocks(tool_calls: list[ToolCallView], mocks: list[dict[str, Any]]) -> None:
-    """Flag which calls were mocked and whether the payload matches byte-wise."""
-    by_name: dict[str, Any] = {}
-    for mock in mocks:
-        name = mock.get("tool_name") or mock.get("name")
-        if name:
-            by_name[str(name)] = mock.get("mock_output")
+    """Match calls to individual mock declarations, including repeated tools.
+
+    The old name->payload map silently collapsed two mocks for the same tool.
+    Here every declaration is consumable once. Exact expected-input matches
+    win. A same-name call with the wrong input is marked as a mismatch but does
+    not consume a declaration that a later, correct call may satisfy.
+    """
+    indexed = [
+        (index, mock, str(mock.get("tool_name") or mock.get("name") or ""))
+        for index, mock in enumerate(mocks)
+        if mock.get("tool_name") or mock.get("name")
+    ]
+    consumed: set[int] = set()
     for call in tool_calls:
-        if call.name not in by_name:
+        candidates = [entry for entry in indexed if entry[0] not in consumed and entry[2] == call.name]
+        if not candidates:
             continue
+        chosen = next(
+            (
+                entry
+                for entry in candidates
+                if _expected_input_matches(entry[1].get("expected_input"), call.args)
+            ),
+            None,
+        )
+        if chosen is None:
+            call.declared_mock = True
+            call.matches_mock_input = False
+            continue
+        index, mock, _ = chosen
+        consumed.add(index)
         call.declared_mock = True
-        expected = by_name[call.name]
-        if expected is None:
-            continue
-        call.matches_mock = canonical(expected) == canonical(call.output)
+        call.declared_mock_index = index
+        call.matches_mock_input = True
+        expected_output = mock.get("mock_output")
+        if expected_output is not None:
+            call.matches_mock = canonical(expected_output) == canonical(call.output)
 
 
 def _parse_trace(trace: Any) -> dict[str, Any]:
