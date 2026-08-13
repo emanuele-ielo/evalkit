@@ -1,37 +1,77 @@
-# evalkit
+<div align="center">
 
-Eval kit for Wonderful agents. `wful` is the engine — it runs scenarios, reads
-traces, fetches results and activity records. Everything else here is ours:
-collection, our own 1–5 rubric with an LLM panel, metrics, and a local dashboard
-that drills from a campaign down to a single conversation.
+# EvalKit
+
+**Run, judge, compare, and inspect evaluations for Wonderful agents.**
+
+A local-first evaluation loop powered by `wful`, deterministic tool checks,
+a 1–5 LLM judging panel, and a dashboard that drills from campaign trends down
+to individual conversations.
+
+<p>
+  <code>Python 3.12+</code> · <code>FastAPI</code> · <code>React</code> · <code>wful</code>
+</p>
+
+</div>
+
+<p align="center">
+  <img src="docs/assets/evalkit-dashboard.png" alt="EvalKit campaign dashboard with scores, judging progress, criteria, and failure tags" width="1200">
+</p>
+
+## What it does
+
+- Runs live scenario campaigns through `wful` or imports cached results.
+- Collects traces, result payloads, activity records, and token usage.
+- Enforces deterministic tool contracts before an LLM judge runs.
+- Grades each attempt with a multi-criterion 1–5 rubric and stores every vote.
+- Compares campaigns and the platform evaluator without letting either overwrite
+  the underlying evidence.
+- Serves a live, read-only dashboard for campaign and conversation-level analysis.
+
+## Quick start
+
+Create the environment and configure the agent, workspace, and `wful` profile:
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -e .
-cp evalkit.example.toml evalkit.toml    # then point it at your agent
-.venv/bin/python -m evalkit.cli doctor          # check wiring, credentials, wful
-.venv/bin/python -m evalkit.cli import <dir> --agent vera   # cached results → campaign
-.venv/bin/python -m evalkit.cli run --agent vera --rounds 3 # live campaign
-.venv/bin/python -m evalkit.cli judge <campaign>            # grade with our rubric
-.venv/bin/python -m evalkit.cli reaggregate <campaign>      # recompute pass from stored votes, no LLM calls
-.venv/bin/python -m evalkit.cli report <campaign> --vs <other>
-.venv/bin/python -m evalkit.cli serve                       # dashboard on :4747
-cd dashboard && pnpm install && pnpm build                  # build the UI
+python3 -m venv .venv
+.venv/bin/pip install -e .
+cp evalkit.example.toml evalkit.toml
+.venv/bin/python -m evalkit.cli doctor
 ```
 
-See `STATE.md` for the current state of the work, the numbers measured so far,
-and the open threads. Design notes live at the top of each module.
+Run a live campaign, or turn cached platform results into one:
 
-`data/` holds collected eval data (customer content) and is never committed.
+```bash
+.venv/bin/python -m evalkit.cli run --agent vera --rounds 3
+.venv/bin/python -m evalkit.cli import <dir> --agent vera
+```
 
-`evalkit.toml` names the agent, the wful profile and the workspace, and both are
-passed explicitly on every platform command so a run cannot land in the wrong
-tenant. The platform is read-only except `eval run`, enforced by an allowlist in
+Judge, reaggregate, and compare campaigns:
+
+```bash
+.venv/bin/python -m evalkit.cli judge <campaign>
+.venv/bin/python -m evalkit.cli reaggregate <campaign>
+.venv/bin/python -m evalkit.cli report <campaign> --vs <other>
+```
+
+Build and launch the dashboard at [http://localhost:4747](http://localhost:4747):
+
+```bash
+cd dashboard && pnpm install && pnpm build && cd ..
+.venv/bin/python -m evalkit.cli serve
+```
+
+## How scoring works
+
+The binary pass is a bridge for comparisons, not the source of truth. By default,
+every turn must average at least 4/5, with no blocking deterministic failure and
+no catastrophic 1/5 criterion. A 2/5 is still highlighted and lowers the mean,
+but does not veto an otherwise strong answer.
+
+`evalkit.toml` names the agent, `wful` profile, and workspace. EvalKit passes them
+explicitly on every platform command so a run cannot land in the wrong tenant.
+The platform is read-only except for `eval run`, enforced by an allowlist in
 `evalkit/wful.py`.
-
-The binary pass is only a bridge for comparisons: by default every turn must
-average at least 4/5, with no blocking deterministic failure and no catastrophic
-1/5 criterion. A 2/5 is still highlighted and lowers the mean, but does not veto
-an otherwise strong answer.
 
 ## Deterministic tool contracts (v5)
 
@@ -60,3 +100,9 @@ For Vera the default is the full 115-scenario suite (70 knowledge/customer-care
 64 under the configured rate limiter. The platform is used only to execute the
 agent and collect artifacts; its evaluator verdict is retained for comparison
 but never determines EvalKit's score.
+
+## Repository notes
+
+- `STATE.md` tracks measured results, current work, and open threads.
+- `data/` contains collected customer data and is never committed.
+- Design notes live at the top of each module.
