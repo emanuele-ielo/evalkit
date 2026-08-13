@@ -89,6 +89,16 @@ def _tool_call_view(index: int, details: dict[str, Any]) -> ToolCallView:
         truncated=bool(output_raw) and (output_raw.rstrip().endswith("…") or "[truncated" in output_raw[-40:]),
         call_id=details.get("call_id"),
         duration_ms=details.get("duration_ms"),
+        call_source=(
+            str(details["call_source"])
+            if details.get("call_source") is not None
+            else None
+        ),
+        trigger_type=(
+            str(details["trigger_type"])
+            if details.get("trigger_type") is not None
+            else None
+        ),
     )
 
 

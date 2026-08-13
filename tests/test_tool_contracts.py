@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from evalkit.deterministic import blocking_failures, check_turn, taxonomy_from_checks
-from evalkit.normalize import _mark_mocks
+from evalkit.normalize import _mark_mocks, _tool_call_view
 from evalkit.schemas import ExpectedTurnView, ToolCallView, TurnView
 
 
@@ -28,6 +28,93 @@ def by_name(checks):
 
 
 class ToolContractsTest(unittest.TestCase):
+    def test_normalizer_preserves_lifecycle_trigger_metadata(self) -> None:
+        view = _tool_call_view(
+            0,
+            {
+                "function_name": "resolve_customer_context",
+                "params": {},
+                "output": {"success": True},
+                "call_source": "trigger",
+                "trigger_type": "on_start",
+            },
+        )
+
+        self.assertEqual(view.call_source, "trigger")
+        self.assertEqual(view.trigger_type, "on_start")
+        self.assertTrue(view.is_trigger)
+
+    def test_trigger_is_observed_but_not_a_business_call_on_clarification(self) -> None:
+        trigger = ToolCallView(
+            index=0,
+            name="resolve_customer_context",
+            args={},
+            output={"success": True},
+            call_source="trigger",
+            trigger_type="on_start",
+        )
+        mocks = [
+            {
+                "tool_name": "resolve_customer_context",
+                "expected_input": {},
+                "mock_output": {"success": True},
+            }
+        ]
+        _mark_mocks([trigger], mocks)
+        target = turn(
+            [trigger],
+            {"response_mode": "clarify"},
+            tools_allowed=["search_vera"],
+        )
+        target.expected.declared_mocks = mocks
+
+        checks = by_name(check_turn(target))
+
+        self.assertTrue(checks["clarification_no_tool"].passed)
+        self.assertTrue(checks["tools_allowed"].passed)
+        self.assertTrue(checks["declared_mocks_called"].passed)
+
+    def test_trigger_does_not_satisfy_business_tool_call_present(self) -> None:
+        trigger = ToolCallView(
+            index=0,
+            name="resolve_customer_context",
+            call_source="trigger",
+            trigger_type="on_start",
+        )
+        checks = by_name(
+            check_turn(
+                turn(
+                    [trigger],
+                    {"response_mode": "answer"},
+                    tools_allowed=["search_vera"],
+                )
+            )
+        )
+
+        self.assertTrue(checks["tools_allowed"].passed)
+        self.assertFalse(checks["tool_call_present"].passed)
+
+    def test_tool_allowlist_reports_only_the_unauthorized_business_call(self) -> None:
+        trigger = ToolCallView(
+            index=0,
+            name="resolve_customer_context",
+            call_source="trigger",
+            trigger_type="on_start",
+        )
+        unauthorized = ToolCallView(index=1, name="get_line_context")
+        checks = by_name(
+            check_turn(
+                turn(
+                    [trigger, unauthorized],
+                    {"response_mode": "answer"},
+                    tools_allowed=["search_vera"],
+                )
+            )
+        )
+
+        self.assertFalse(checks["tools_allowed"].passed)
+        self.assertEqual(checks["tools_allowed"].hits, ["get_line_context"])
+
     def test_v5_accepts_required_ordered_single_calls(self) -> None:
         checks = check_turn(
             turn(

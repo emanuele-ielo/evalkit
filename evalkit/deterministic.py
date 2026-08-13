@@ -231,23 +231,27 @@ def check_turn(turn: TurnView, *, require_tool_call: bool | None = None) -> list
 
     # -- tool discipline -----------------------------------------------------
     called = [call.name for call in turn.tool_calls]
+    # Lifecycle triggers are platform-driven, not choices made by the agent.
+    # Keep them in `called` for explicit lifecycle contracts and mock checks,
+    # but exclude them from the three checks that judge business-tool use.
+    business_called = [call.name for call in turn.tool_calls if not call.is_trigger]
     allowed = set(turn.expected.tools_allowed)
     contract = turn.expected.metadata.get("evalkit_v5") or turn.expected.metadata.get("evalkit_v4")
     if isinstance(contract, dict) and contract.get("response_mode") == "clarify":
         checks.append(
             DeterministicCheck(
                 name="clarification_no_tool",
-                passed=not called,
+                passed=not business_called,
                 detail=(
                     "underspecified turn correctly paused before retrieval"
-                    if not called
+                    if not business_called
                     else "agent searched before obtaining the missing decision slot"
                 ),
-                hits=sorted(set(called)),
+                hits=sorted(set(business_called)),
             )
         )
     if allowed:
-        outside = sorted({name for name in called if name not in allowed})
+        outside = sorted({name for name in business_called if name not in allowed})
         checks.append(
             DeterministicCheck(
                 name="tools_allowed",
@@ -398,8 +402,12 @@ def check_turn(turn: TurnView, *, require_tool_call: bool | None = None) -> list
         checks.append(
             DeterministicCheck(
                 name="tool_call_present",
-                passed=bool(called),
-                detail="agent used its tools" if called else "agent answered without calling any tool",
+                passed=bool(business_called),
+                detail=(
+                    "agent used its tools"
+                    if business_called
+                    else "agent answered without calling any tool"
+                ),
                 hits=[],
             )
         )

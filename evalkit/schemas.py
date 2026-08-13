@@ -151,11 +151,18 @@ class ToolCallView(BaseModel):
     truncated: bool = False
     call_id: str | None = None
     duration_ms: int | None = None
+    call_source: str | None = None
+    trigger_type: str | None = None
     # Oracle scenarios declare mocks: did this call match one, and byte-wise?
     declared_mock: bool = False
     declared_mock_index: int | None = None
     matches_mock_input: bool | None = None
     matches_mock: bool | None = None
+
+    @property
+    def is_trigger(self) -> bool:
+        """Wonderful lifecycle calls are observable, but not agent tool choices."""
+        return (self.call_source or "").strip().lower() == "trigger"
 
 
 class MessageView(BaseModel):
