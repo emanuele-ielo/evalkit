@@ -277,12 +277,16 @@ def _expected_input_matches(expected: Any, actual: dict[str, Any] | None) -> boo
 
 
 def _mark_mocks(tool_calls: list[ToolCallView], mocks: list[dict[str, Any]]) -> None:
-    """Match calls to individual mock declarations, including repeated tools.
+    """Match calls to individual mock/expectation declarations.
 
     The old name->payload map silently collapsed two mocks for the same tool.
     Here every declaration is consumable once. Exact expected-input matches
     win. A same-name call with the wrong input is marked as a mismatch but does
     not consume a declaration that a later, correct call may satisfy.
+
+    Wonderful ignores declarations with ``enabled: false`` at runtime. EvalKit
+    still uses them as passthrough input expectations, but never labels their
+    real payload as mocked or compares it with ``mock_output``.
     """
     indexed = [
         (index, mock, str(mock.get("tool_name") or mock.get("name") or ""))
@@ -309,10 +313,11 @@ def _mark_mocks(tool_calls: list[ToolCallView], mocks: list[dict[str, Any]]) -> 
         index, mock, _ = chosen
         consumed.add(index)
         call.declared_mock = True
+        call.runtime_mocked = mock.get("enabled", True) is not False
         call.declared_mock_index = index
         call.matches_mock_input = True
         expected_output = mock.get("mock_output")
-        if expected_output is not None:
+        if call.runtime_mocked and expected_output is not None:
             call.matches_mock = canonical(expected_output) == canonical(call.output)
 
 

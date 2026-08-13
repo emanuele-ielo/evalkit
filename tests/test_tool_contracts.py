@@ -455,6 +455,92 @@ class ToolContractsTest(unittest.TestCase):
         self.assertTrue(checks["declared_mocks_called"].passed)
         self.assertTrue(checks["mock_expected_input"].passed)
 
+    def test_disabled_mock_is_passthrough_expectation_not_mocked_payload(self) -> None:
+        calls = [call("lookup", args={"kind": "real"}, output={"live": True})]
+        mocks = [
+            {
+                "tool_name": "lookup",
+                "enabled": False,
+                "expected_input": {"kind": "real"},
+                "mock_output": {},
+            }
+        ]
+
+        _mark_mocks(calls, mocks)
+
+        self.assertTrue(calls[0].declared_mock)
+        self.assertFalse(calls[0].runtime_mocked)
+        self.assertTrue(calls[0].matches_mock_input)
+        self.assertIsNone(calls[0].matches_mock)
+
+        target = turn(calls, {"required_tools": ["lookup"]})
+        target.expected.declared_mocks = mocks
+        checks = by_name(check_turn(target))
+        self.assertNotIn("declared_mocks_called", checks)
+        self.assertTrue(checks["mock_expected_input"].passed)
+        self.assertTrue(checks["mock_payload_matches"].passed)
+
+        view = normalize_attempt(
+            campaign="test",
+            scenario="passthrough",
+            short="passthrough",
+            round_=1,
+            result={
+                "scenario_definition": {
+                    "name": "passthrough",
+                    "instructions": {
+                        "turns": [
+                            {
+                                "user_message": "Cerca",
+                                "tool_mocks": mocks,
+                                "metadata": {"evalkit_v5": {"required_tools": ["lookup"]}},
+                            }
+                        ]
+                    },
+                },
+                "turn_results": [
+                    {
+                        "evaluation_turn": {"user_message": "Cerca"},
+                        "turn_state": {
+                            "agent_responses": [
+                                {
+                                    "tool_details": {
+                                        "function_name": "lookup",
+                                        "params": {"kind": "real"},
+                                        "output": {"live": True},
+                                    }
+                                },
+                                {"speaker": "agent", "text": "Fatto."},
+                            ]
+                        },
+                    }
+                ],
+            },
+        )
+        _, prompt = build_vote_prompt(view, view.turns[0], check_turn(view.turns[0]))
+        self.assertNotIn("payload was mocked by the scenario", prompt)
+        self.assertIn('"required_tools"', prompt)
+
+    def test_disabled_mock_still_checks_real_tool_input(self) -> None:
+        calls = [call("lookup", args={"kind": "wrong"}, output={"live": True})]
+        mocks = [
+            {
+                "tool_name": "lookup",
+                "enabled": False,
+                "expected_input": {"kind": "right"},
+                "mock_output": {},
+            }
+        ]
+
+        _mark_mocks(calls, mocks)
+        target = turn(calls, {"required_tools": ["lookup"]})
+        target.expected.declared_mocks = mocks
+        checks = by_name(check_turn(target))
+
+        self.assertFalse(calls[0].runtime_mocked)
+        self.assertFalse(checks["mock_expected_input"].passed)
+        self.assertNotIn("declared_mocks_called", checks)
+
     def test_mock_input_mismatch_is_blocking_and_visible(self) -> None:
         calls = [call("get_line_usage", args={"number": "3331234567"}, output={"success": True})]
         mocks = [{"tool_name": "get_line_usage", "expected_input": {}, "mock_output": {"success": True}}]

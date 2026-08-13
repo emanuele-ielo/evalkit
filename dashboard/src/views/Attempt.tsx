@@ -82,7 +82,7 @@ function ToolCard({ call, focus }: { call: ToolCallView; focus: Focus | null }) 
         <span className="tname">{call.name}</span>
         <span className="kind">tool call</span>
         <span className="peek">{JSON.stringify(call.args ?? {}).slice(0, 160)}</span>
-        {call.declared_mock && (
+        {(call.runtime_mocked ?? call.declared_mock) && (
           <Pill tone={call.matches_mock === false ? 'warn' : 'accent'}>
             {call.matches_mock === false ? 'mock drift' : 'mocked'}
           </Pill>

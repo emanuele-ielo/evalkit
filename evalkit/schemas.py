@@ -155,6 +155,9 @@ class ToolCallView(BaseModel):
     trigger_type: str | None = None
     # Oracle scenarios declare mocks: did this call match one, and byte-wise?
     declared_mock: bool = False
+    # Disabled Wonderful mocks are passthrough expectations: they can validate
+    # the real tool input, but the runtime did not replace the tool payload.
+    runtime_mocked: bool = False
     declared_mock_index: int | None = None
     matches_mock_input: bool | None = None
     matches_mock: bool | None = None

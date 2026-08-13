@@ -152,6 +152,7 @@ export interface ToolCallView {
   call_id: string | null
   duration_ms: number | null
   declared_mock: boolean
+  runtime_mocked?: boolean
   matches_mock: boolean | null
 }
 

@@ -334,17 +334,24 @@ def check_turn(turn: TurnView, *, require_tool_call: bool | None = None) -> list
                 )
             )
 
-    declared = [
+    declared_runtime_mocks = [
+        (index, str(m.get("tool_name") or m.get("name")))
+        for index, m in enumerate(turn.expected.declared_mocks)
+        if m.get("enabled", True) is not False
+        and (m.get("tool_name") or m.get("name"))
+    ]
+    declared_expectations = [
         str(m.get("tool_name") or m.get("name"))
         for m in turn.expected.declared_mocks
         if m.get("tool_name") or m.get("name")
     ]
-    if declared:
-        declared_counts = Counter(declared)
+    if declared_runtime_mocks:
+        declared_counts = Counter(name for _, name in declared_runtime_mocks)
+        runtime_mock_indexes = {index for index, _ in declared_runtime_mocks}
         called_counts = Counter(
             call.name
             for call in turn.tool_calls
-            if call.declared_mock_index is not None
+            if call.declared_mock_index in runtime_mock_indexes
         )
         uncalled = [
             f"{name} x{expected - called_counts[name]}"
@@ -363,7 +370,12 @@ def check_turn(turn: TurnView, *, require_tool_call: bool | None = None) -> list
                 hits=uncalled,
             )
         )
-        input_mismatches = [call.name for call in turn.tool_calls if call.declared_mock and call.matches_mock_input is False]
+    if declared_expectations:
+        input_mismatches = [
+            call.name
+            for call in turn.tool_calls
+            if call.declared_mock and call.matches_mock_input is False
+        ]
         checks.append(
             DeterministicCheck(
                 name="mock_expected_input",
@@ -376,7 +388,11 @@ def check_turn(turn: TurnView, *, require_tool_call: bool | None = None) -> list
                 hits=input_mismatches,
             )
         )
-        mismatched = [call.name for call in turn.tool_calls if call.declared_mock and call.matches_mock is False]
+        mismatched = [
+            call.name
+            for call in turn.tool_calls
+            if call.runtime_mocked and call.matches_mock is False
+        ]
         checks.append(
             DeterministicCheck(
                 name="mock_payload_matches",
@@ -397,7 +413,7 @@ def check_turn(turn: TurnView, *, require_tool_call: bool | None = None) -> list
             needs_tool = False
         else:
             required = contract.get("required_tools") if isinstance(contract, dict) else None
-            needs_tool = bool(required or allowed or declared)
+            needs_tool = bool(required or allowed or declared_expectations)
     if needs_tool:
         checks.append(
             DeterministicCheck(

@@ -25,6 +25,8 @@ from typing import Any
 
 from ..schemas import AttemptView, DeterministicCheck, ToolCallView, TurnView
 
+# v5 (2026-08-13): read EvalKit v5 turn contracts and distinguish disabled
+# passthrough expectations from payloads actually mocked by Wonderful.
 # v4 (2026-08-12): customer-care answers no longer cite corpus provenance and
 # LOB validation is no longer model-facing or graded. Underspecified requests
 # are judged conversationally: one focused clarification can be the complete
@@ -32,7 +34,7 @@ from ..schemas import AttemptView, DeterministicCheck, ToolCallView, TurnView
 # This versions the prompt and structured vote semantics. The downstream pass
 # bridge is independently persisted in JudgeSettings, so changing only its
 # thresholds does not invalidate or spend new LLM votes.
-RUBRIC_VERSION = "v4"
+RUBRIC_VERSION = "v5"
 
 # Per-call payload budget in the prompt. Payloads here run to ~31 KB; the cap is
 # generous on purpose and truncation is always announced to the judge.
@@ -245,7 +247,7 @@ def _format_payload(call: ToolCallView) -> str:
         note += "\n… [the platform itself marked this payload as truncated]"
     args = json.dumps(call.args or {}, ensure_ascii=False)
     header = f"[{call.index}] tool `{call.name}` called with {args}"
-    if call.declared_mock:
+    if call.runtime_mocked:
         header += " (payload was mocked by the scenario"
         if call.matches_mock is False:
             header += ", and differs from the frozen mock"
@@ -301,9 +303,9 @@ def build_vote_prompt(
 
     parts.append(f"## AGENT ANSWER (graded)\n{turn.agent_text or '(empty answer)'}")
 
-    contract = turn.expected.metadata.get("evalkit_v4")
+    contract = turn.expected.metadata.get("evalkit_v5") or turn.expected.metadata.get("evalkit_v4")
     if isinstance(contract, dict):
-        parts.append("## TURN CONTRACT (authoritative v4 obligations)\n" + json.dumps(contract, ensure_ascii=False, indent=1))
+        parts.append("## TURN CONTRACT (authoritative obligations)\n" + json.dumps(contract, ensure_ascii=False, indent=1))
     if turn.expected.reference_response:
         parts.append(
             "## REFERENCE ANSWER (a good answer, not the only one)\n"
