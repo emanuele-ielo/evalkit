@@ -359,6 +359,56 @@ class ToolContractsTest(unittest.TestCase):
         self.assertTrue(checks["tools_allowed"].passed)
         self.assertFalse(checks["tool_call_present"].passed)
 
+    def test_switch_skill_is_control_plane_not_business_tool(self) -> None:
+        target = turn(
+            [
+                call("switch_skill", args={"skill_name": "vera-data"}, output={"success": True}),
+                call("search_vera", args={"query": "5G"}, output={"found": 1}),
+            ],
+            {"required_tools": ["search_vera"]},
+            tools_allowed=["search_vera"],
+        )
+
+        checks = by_name(check_turn(target))
+
+        self.assertTrue(target.tool_calls[0].is_control_plane)
+        self.assertTrue(checks["tools_allowed"].passed)
+        self.assertTrue(checks["tool_call_present"].passed)
+
+    def test_v5_without_semantic_obligations_falls_back_to_reference_facts(self) -> None:
+        view = normalize_attempt(
+            campaign="test",
+            scenario="deterministic-only-v5",
+            short="deterministic-only-v5",
+            round_=1,
+            result={
+                "scenario_definition": {
+                    "name": "deterministic-only-v5",
+                    "instructions": {
+                        "turns": [
+                            {
+                                "user_message": "Domanda",
+                                "expected_output": "La risposta deve dichiarare che è un profilo di test.",
+                                "metadata": {"evalkit_v5": {"required_tools": ["search_vera"]}},
+                            }
+                        ]
+                    },
+                },
+                "turn_results": [
+                    {
+                        "evaluation_turn": {"user_message": "Domanda"},
+                        "turn_state": {"agent_responses": [{"speaker": "agent", "text": "Risposta."}]},
+                    }
+                ],
+            },
+        )
+
+        _, prompt = build_vote_prompt(view, view.turns[0], check_turn(view.turns[0]))
+
+        self.assertNotIn("## TURN CONTRACT", prompt)
+        self.assertIn("## REFERENCE FACTS", prompt)
+        self.assertIn("profilo di test", prompt)
+
     def test_tool_allowlist_reports_only_the_unauthorized_business_call(self) -> None:
         trigger = ToolCallView(
             index=0,
@@ -519,7 +569,7 @@ class ToolContractsTest(unittest.TestCase):
         )
         _, prompt = build_vote_prompt(view, view.turns[0], check_turn(view.turns[0]))
         self.assertNotIn("payload was mocked by the scenario", prompt)
-        self.assertIn('"required_tools"', prompt)
+        self.assertIn("required_tools: PASS", prompt)
 
     def test_disabled_mock_still_checks_real_tool_input(self) -> None:
         calls = [call("lookup", args={"kind": "wrong"}, output={"live": True})]

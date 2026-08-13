@@ -234,7 +234,7 @@ def check_turn(turn: TurnView, *, require_tool_call: bool | None = None) -> list
     # Lifecycle triggers are platform-driven, not choices made by the agent.
     # Keep them in `called` for explicit lifecycle contracts and mock checks,
     # but exclude them from the three checks that judge business-tool use.
-    business_called = [call.name for call in turn.tool_calls if not call.is_trigger]
+    business_called = [call.name for call in turn.tool_calls if not call.is_control_plane]
     allowed = set(turn.expected.tools_allowed)
     contract = turn.expected.metadata.get("evalkit_v5") or turn.expected.metadata.get("evalkit_v4")
     if isinstance(contract, dict) and contract.get("response_mode") == "clarify":

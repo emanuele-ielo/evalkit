@@ -167,6 +167,11 @@ class ToolCallView(BaseModel):
         """Wonderful lifecycle calls are observable, but not agent tool choices."""
         return (self.call_source or "").strip().lower() == "trigger"
 
+    @property
+    def is_control_plane(self) -> bool:
+        """Routing/lifecycle calls are evidence, not customer-domain tools."""
+        return self.is_trigger or self.name == "switch_skill"
+
 
 class MessageView(BaseModel):
     """One item on the conversation spine, in chronological order."""

@@ -294,7 +294,7 @@ def build_vote_prompt(
 
     parts.append(f"## USER MESSAGE\n{turn.user_message or '(none recorded)'}")
 
-    business_calls = [call for call in turn.tool_calls if not call.is_trigger]
+    business_calls = [call for call in turn.tool_calls if not call.is_control_plane]
     if business_calls:
         payloads = "\n\n".join(_format_payload(call) for call in business_calls)
     else:
@@ -304,7 +304,11 @@ def build_vote_prompt(
     parts.append(f"## AGENT ANSWER (graded)\n{turn.agent_text or '(empty answer)'}")
 
     contract = turn.expected.metadata.get("evalkit_v5") or turn.expected.metadata.get("evalkit_v4")
-    if isinstance(contract, dict):
+    has_semantic_contract = isinstance(contract, dict) and any(
+        contract.get(key) is not None
+        for key in ("required_obligations", "required_conditions", "optional_facts")
+    )
+    if has_semantic_contract:
         parts.append("## TURN CONTRACT (authoritative obligations)\n" + json.dumps(contract, ensure_ascii=False, indent=1))
     if turn.expected.reference_response:
         parts.append(
